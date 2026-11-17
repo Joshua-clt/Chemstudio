@@ -1,5 +1,4 @@
 streamlit
-streamlit-ketcher
 rdkit-pypi
 requests
 py3Dmol
