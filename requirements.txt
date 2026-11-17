@@ -5,4 +5,4 @@ requests
 py3Dmol
 pandas
 pillow
-numphy
+numpy
