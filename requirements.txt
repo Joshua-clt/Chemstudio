@@ -2,5 +2,6 @@ streamlit
 streamlit-ketcher
 rdkit
 requests
-stmol
 py3Dmol
+pandas
+pillow
