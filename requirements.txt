@@ -1,6 +1,6 @@
 streamlit
 streamlit-ketcher
-rdkit-pypi
+rdkit
 requests
 py3Dmol
 pandas
