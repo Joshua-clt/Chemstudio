@@ -1,4 +1,6 @@
 streamlit
 streamlit-ketcher
 rdkit
-pillow
+requests
+stmol
+py3Dmol
