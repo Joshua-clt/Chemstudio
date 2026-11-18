@@ -554,13 +554,117 @@ def simulate_advanced_nmr_1d_2d(mol):
         pd.DataFrame(hmbc_pts)
     )
 
-def build_lorentzian_spectrum(df_peaks, col_shift, x_min, x_max, width=0.08):
-    x = np.linspace(x_min, x_max, 800)
+def build_lorentzian_spectrum(df_peaks, col_shift, x_min, x_max, width=0.003, freq_mhz=400.0):
+    """
+    Génère un spectre RMN 1D haute résolution (4500 points) avec éclatement réel des multiplets
+    selon le triangle de Pascal (s, d, t, q, m) et pondération par l'intégration (nombre de H).
+    """
+    x = np.linspace(x_min, x_max, 4500)
     y = np.zeros_like(x)
+
+    # Coefficients du triangle de Pascal pour les multiplicités RMN
+    pascal_map = {
+        "s": [1.0],
+        "s large": [1.0],
+        "d": [1.0, 1.0],
+        "t": [1.0, 2.0, 1.0],
+        "q": [1.0, 3.0, 3.0, 1.0],
+        "m": [1.0, 4.0, 6.0, 4.0, 1.0]
+    }
+    j_coupling_hz = 7.5  # Constante de couplage 3J_HH standard en Hz
+    delta_j_ppm = j_coupling_hz / freq_mhz  # Écart entre les sous-pics en ppm (~0.019 ppm à 400 MHz)
+
     for _, row in df_peaks.iterrows():
-        x0 = row[col_shift]
-        y += 1.0 / (1.0 + ((x - x0) / width) ** 2)
+        x0 = float(row[col_shift])
+        
+        # Lecture de l'intégration (ex: "3H" -> 3.0)
+        n_nuclei = 1.0
+        if "Intégration" in row:
+            try:
+                n_nuclei = float(str(row["Intégration"]).replace("H", "").strip())
+            except Exception:
+                n_nuclei = 1.0
+
+        # Lecture de la multiplicité (ex: "t (triplet)" -> "t")
+        mult_key = "s"
+        w_peak = width
+        if "Multiplicité" in row:
+            m_str = str(row["Multiplicité"]).strip()
+            if "large" in m_str:
+                mult_key = "s large"
+                w_peak = width * 4.5  # Pic élargi pour les protons échangeables (-OH, -NH, -COOH)
+            else:
+                mult_key = m_str.split(" ")[0]
+
+        weights = pascal_map.get(mult_key, [1.0])
+        tot_w = sum(weights)
+        n_lines = len(weights)
+
+        # Somme des sous-pics lorentziens du multiplet
+        for k, w in enumerate(weights):
+            offset_ppm = (k - (n_lines - 1) / 2.0) * delta_j_ppm
+            xk = x0 + offset_ppm
+            amp = (n_nuclei * (w / tot_w))
+            y += amp / (1.0 + ((x - xk) / w_peak) ** 2)
+
     return pd.DataFrame({"δ (ppm)": x, "Intensité": y}).set_index("δ (ppm)")
+
+
+def render_2d_nmr_contour_plot(df_2d, x_col, y_col, color_col, x_domain, y_domain, is_cosy=False):
+    """
+    Affiche une véritable carte de corrélation RMN 2D avec taches de contours concentriques,
+    axes chimiques inversés (convention IUPAC : champs faibles à gauche) et diagonale COSY.
+    """
+    layers = []
+
+    # En COSY, on trace la ligne diagonale (F1 = F2) et les lignes de couplage en pointillés
+    if is_cosy:
+        diag_df = pd.DataFrame({x_col: [x_domain[1], x_domain[0]], y_col: [y_domain[1], y_domain[0]]})
+        layers.append({
+            "data": {"values": diag_df.to_dict(orient="records")},
+            "mark": {"type": "line", "strokeDash": [5, 5], "color": "#94a3b8", " opacity": 0.6},
+            "encoding": {
+                "x": {"field": x_col, "type": "quantitative"},
+                "y": {"field": y_col, "type": "quantitative"}
+            }
+        })
+
+    # Création de 3 courbes de niveau concentriques (contours topographiques RMN)
+    for size_pt, opacity_val in [(480, 0.20), (200, 0.45), (55, 0.95)]:
+        layers.append({
+            "mark": {"type": "circle", "size": size_pt, "opacity": opacity_val, "strokeWidth": 1},
+            "encoding": {
+                "x": {
+                    "field": x_col,
+                    "type": "quantitative",
+                    "scale": {"domain": x_domain},
+                    "title": x_col
+                },
+                "y": {
+                    "field": y_col,
+                    "type": "quantitative",
+                    "scale": {"domain": y_domain},
+                    "title": y_col
+                },
+                "color": {
+                    "field": color_col,
+                    "type": "nominal",
+                    "legend": {"orient": "top"}
+                },
+                "tooltip": [
+                    {"field": x_col, "type": "quantitative"},
+                    {"field": y_col, "type": "quantitative"},
+                    {"field": color_col, "type": "nominal"}
+                ]
+            }
+        })
+
+    spec = {
+        "height": 390,
+        "data": {"values": df_2d.to_dict(orient="records")},
+        "layer": layers
+    }
+    st.vega_lite_chart(spec, use_container_width=True)
 
 # ==========================================
 # 6. SPECTRE ISOTOPIQUE & STUDIO DE PUBLICATION
@@ -1058,32 +1162,63 @@ with tab_spec:
 
         elif spec_tool.startswith("🧲"):
             df_h, df_c, _, _, _ = simulate_advanced_nmr_1d_2d(mol_main)
+            
+            # Sélecteur de fréquence du spectromètre et zoom pour bien distinguer les multiplets
+            f_col1, f_col2, f_col3 = st.columns([1.2, 1.4, 1.4])
+            freq_mhz = f_col1.selectbox("Fréquence du spectromètre :", [300.0, 400.0, 500.0], index=1, format_func=lambda v: f"{int(v)} MHz")
+            zoom_h = f_col2.slider("Fenêtre de zoom RMN ¹H (ppm) :", 0.0, 13.0, (0.0, 10.5), 0.5)
+            zoom_c = f_col3.slider("Fenêtre de zoom RMN ¹³C (ppm) :", 0.0, 220.0, (0.0, 210.0), 5.0)
+
             n1, n2 = st.columns(2)
             with n1:
-                st.markdown("##### Spectre RMN ¹H Haute Précision (Incréments de Shoolery)")
+                st.markdown(f"##### Spectre RMN ¹H ({int(freq_mhz)} MHz — Multiplets résolus)")
+                st.caption("💡 *Utilisez le curseur de zoom ¹H ci-dessus (ex: sur une fenêtre de 2 ppm) pour observer nettement les doublets, triplets et quadruplets.*")
                 if not df_h.empty:
-                    st.line_chart(build_lorentzian_spectrum(df_h, "δ ¹H (ppm)", 0.0, 13.0, width=0.05), height=220)
+                    spec_h = build_lorentzian_spectrum(df_h, "δ ¹H (ppm)", zoom_h[0], zoom_h[1], width=0.0025, freq_mhz=freq_mhz)
+                    st.line_chart(spec_h, height=250)
                     st.dataframe(df_h, use_container_width=True, hide_index=True)
             with n2:
-                st.markdown("##### Spectre RMN ¹³C Haute Précision (Incréments α/β/γ)")
+                st.markdown("##### Spectre RMN ¹³C {¹H} (Découplé)")
                 if not df_c.empty:
-                    st.line_chart(build_lorentzian_spectrum(df_c, "δ ¹³C (ppm)", 0.0, 220.0, width=0.7), height=220)
+                    spec_c = build_lorentzian_spectrum(df_c, "δ ¹³C (ppm)", zoom_c[0], zoom_c[1], width=0.35, freq_mhz=freq_mhz)
+                    st.line_chart(spec_c, height=250)
                     st.dataframe(df_c, use_container_width=True, hide_index=True)
 
         elif spec_tool.startswith("🗺️"):
             _, _, df_cosy, df_hsqc, df_hmbc = simulate_advanced_nmr_1d_2d(mol_main)
             c2d_1, c2d_2 = st.columns(2)
             with c2d_1:
-                st.markdown("##### Carte 2D ¹H–¹H COSY (Couplages géminés & vicinaux ³J_HH)")
+                st.markdown("##### Carte 2D ¹H–¹H COSY (Contours & Diagonale)")
                 if not df_cosy.empty:
-                    st.scatter_chart(df_cosy, x="δ ¹H F2 (ppm)", y="δ ¹H F1 (ppm)", color="Type", height=320)
+                    render_2d_nmr_contour_plot(
+                        df_cosy,
+                        x_col="δ ¹H F2 (ppm)",
+                        y_col="δ ¹H F1 (ppm)",
+                        color_col="Type",
+                        x_domain=[11.0, 0.0],
+                        y_domain=[11.0, 0.0],
+                        is_cosy=True
+                    )
                     st.dataframe(df_cosy, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Aucun couplage proton-proton détecté.")
+
             with c2d_2:
-                st.markdown("##### Carte 2D Hétéronucléaire ¹H–¹³C : HSQC (¹J_CH) & HMBC (²˒³J_CH)")
+                st.markdown("##### Carte 2D ¹H–¹³C HSQC (¹J_CH) & HMBC (²˒³J_CH)")
                 df_het = pd.concat([df_hsqc, df_hmbc], ignore_index=True)
                 if not df_het.empty:
-                    st.scatter_chart(df_het, x="δ ¹H (ppm)", y="δ ¹³C (ppm)", color="Corrélation", height=320)
+                    render_2d_nmr_contour_plot(
+                        df_het,
+                        x_col="δ ¹H (ppm)",
+                        y_col="δ ¹³C (ppm)",
+                        color_col="Corrélation",
+                        x_domain=[11.0, 0.0],
+                        y_domain=[215.0, 0.0],
+                        is_cosy=False
+                    )
                     st.dataframe(df_het, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Aucune corrélation carbone-proton détectée.")
 
 # ------------------------------------------
 # ONGLET 5 : SÉCURITÉ SGH & STUDIO DE PUBLICATION
