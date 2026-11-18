@@ -326,20 +326,22 @@ def run_retrosynthesis_engine(mol):
     Analyse la molécule cible et applique des règles de déconnexion rétrosynthétiques (Synthons -> Précurseurs réels).
     """
     retro_rules = [
-        ("Coupure d'Ester (Estérification de Fischer / Schotten-Baumann)", "[C:1](=[O:2])[O:3][C,c:4]>>[C:1](=[O:2])O.[O:3][C,c:4]"),
-        ("Coupure d'Amide (Couplage Peptidique / Chlorure d'acyle)", "[C:1](=[O:2])[N;H1,H0:3][C,c:4]>>[C:1](=[O:2])O.[N:3][C,c:4]"),
+        ("Coupure d'Ester (Estérification de Fischer / Schotten-Baumann)", "[C:1](=[O:2])-[O:3]-[C,c:4]>>[C:1](=[O:2])O.[O:3][C,c:4]"),
+        ("Coupure d'Amide (Couplage Peptidique / Chlorure d'acyle)", "[C:1](=[O:2])-[N;H1,H0:3]-[C,c:4]>>[C:1](=[O:2])O.[N:3][C,c:4]"),
         ("Couplage Croisé de Suzuki-Miyaura (Liaison Biaryle Pd⁰)", "[c:1]-[c:2]>>[c:1]Br.[c:2]B(O)O"),
-        ("Synthèse d'Éther de Williamson (Substitution Nucléophile SN2)", "[C;!$(C=O):1][O:2][C,c;!$(C=O):3]>>[C:1]Br.[O:2][C,c:3]"),
-        ("Addition de Grignard sur Carbonyle (Coupure d'Alcool II/III)", "[C,c:1][C;H1,H0:2]([OH:3])[C,c:4]>>[C,c:1]MgBr.[C:2](=[O:3])[C,c:4]"),
-        ("Amination Réductrice (Imine / Borohydrure)", "[C,c:1][CH2:2][N;H1,H2:3]>>[C,c:1][CH:2]=O.[N:3]"),
+        ("Synthèse d'Éther de Williamson (Substitution Nucléophile SN2)", "[CX4:1]-[OX2:2]-[CX4,c:3]>>[C:1]Br.[O:2][C,c:3]"),
+        ("Addition de Grignard sur Carbonyle (Coupure d'Alcool II/III)", "[C,c:1]-[CX4;H1,H0:2](-[OX2H1:3])-[C,c:4]>>[C,c:1][Mg]Br.[C:2](=[O:3])[C,c:4]"),
+        ("Amination Réductrice (Imine / Borohydrure)", "[C,c:1]-[CH2:2]-[NX3;H1,H2:3]>>[C,c:1][CH:2]=O.[N:3]"),
         ("Cycloaddition Click CuAAC (Déconnexion de 1,2,3-Triazole)", "[c:1]1[cH:2][n:3][n:4][n:5]1>>[C:1]#[CH:2].[N:3]=[N+:4]=[N-:5]"),
-        ("Oléfination de Wittig (Coupure d'Alcène C=C)", "[C,c:1][CH:2]=[CH:3][C,c:4]>>[C,c:1][CH:2]=O.[C,c:4][CH2:3]Br")
+        ("Oléfination de Wittig (Coupure d'Alcène C=C)", "[C,c:1]-[CH:2]=[CH:3]-[C,c:4]>>[C,c:1][CH:2]=O.[C,c:4][CH2:3]Br")
     ]
     routes = []
     seen = set()
     for name, smarts in retro_rules:
-        rxn = rdChemReactions.ReactionFromSmarts(smarts)
         try:
+            rxn = rdChemReactions.ReactionFromSmarts(smarts)
+            if not rxn:
+                continue
             prod_sets = rxn.RunReactants((mol,))
             for p_tuple in prod_sets:
                 precursors = []
