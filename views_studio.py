@@ -1,4 +1,5 @@
 import html
+import json
 from typing import Any
 import urllib.parse
 
@@ -26,6 +27,7 @@ from chem_engine import (
     run_retrosynthesis_engine,
     search_pubchem_markush_analogues,
 )
+from sketcher_2d import mol_to_graph
 from theme import safe_html
 
 
@@ -88,10 +90,9 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
         fukui_dialog.open()
 
     # ==================================================================
-    # ONGLET 1 : ATELIER 2D (JSME), 3D, QUANTIQUE & SUPERPOSITION
+    # ONGLET 1 : ATELIER 2D MAISON (PERSISTANT), 3D, QUANTIQUE & OVERLAY
     # ==================================================================
     def render_tab_2d3d():
-        root = ui.element("div")
         view_cfg: dict[str, Any] = {
             "mode_3d": "standard",  # standard | quantum | overlay
             "style": "Ball & Stick",
@@ -108,241 +109,258 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
             "overlay_custom": "",
         }
 
+        init_smi = extract_single_smiles(clean_val(state.get("current_smiles")))
+        init_dark = 1 if state.get("dark", True) else 0
+        state["last_sketcher_smi"] = init_smi
+
+        with ui.element("div").classes("modal-grid"):
+            # --- COLONNE GAUCHE : TOILE 2D PERSISTANTE (NE SE RECHARGE JAMAIS AU DESSIN) ---
+            with ui.element("div").classes("hud-card"):
+                safe_html(
+                    '<div class="section-kicker">ATELIER MOLÉCULAIRE 2D · SYNCHRO EN DIRECT</div>'
+                    '<h2>Dessin &amp; Édition de Structure</h2>'
+                    '<p class="muted-small" style="margin-bottom:10px;">Chaque modification met automatiquement à jour la 3D, la formule et les spectres.</p>'
+                )
+                sketcher_src = f"/api/studio/sketcher?smiles={urllib.parse.quote(init_smi)}&dark={init_dark}"
+                safe_html(
+                    f'<iframe id="cs-sketcher-iframe" class="sketcher-frame" '
+                    f'src="{sketcher_src}" title="Dessinateur 2D ChemStudio"></iframe>'
+                )
+
+                with ui.element("div").style("display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:10px;"):
+                    in_direct_smi = ui.input(
+                        label="SMILES direct (édition ou collage)",
+                        value=init_smi,
+                    ).props("outlined dense")
+
+                    def apply_direct_smi(_e=None):
+                        val = clean_val(in_direct_smi.value)
+                        if not val:
+                            return
+                        if parse_smiles(val) is None:
+                            ui.notify("SMILES invalide.", type="negative")
+                            return
+                        on_molecule_change(val)
+
+                    in_direct_smi.on("keydown.enter", apply_direct_smi)
+                    _btn("Charger SMILES", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=apply_direct_smi)
+
+            # --- COLONNE DROITE : 3D / QUANTIQUE / SUPERPOSITION (RAFRAÎCHIE EN DIRECT) ---
+            right_card = ui.element("div").classes("hud-card")
+
         def refresh_tab():
-            root.clear()
             raw_smi = clean_val(state.get("current_smiles"))
             single_smi = extract_single_smiles(raw_smi)
             mol_main = parse_smiles(single_smi)
             d_flag = 1 if state.get("dark", True) else 0
 
-            with root:
-                with ui.element("div").classes("modal-grid"):
-                    # --- COLONNE GAUCHE : ÉDITEUR 2D JSME ---
-                    with ui.element("div").classes("hud-card"):
-                        safe_html(
-                            '<div class="section-kicker">ÉDITEUR MOLÉCULAIRE 2D (JSME)</div>'
-                            '<h2>Dessin &amp; Édition de Structure</h2>'
-                            '<p class="muted-small" style="margin-bottom:10px;">Dessinez ou modifiez la molécule puis cliquez sur <strong>Appliquer au Studio ➔</strong> en bas du cadre.</p>'
-                        )
-                        jsme_src = f"/api/studio/jsme?smiles={urllib.parse.quote(single_smi)}&dark={d_flag}"
-                        safe_html(f'<iframe class="jsme-frame" src="{jsme_src}" title="Éditeur 2D JSME"></iframe>')
+            # Synchronise le champ SMILES et pousse vers la toile uniquement si changement externe
+            if in_direct_smi.value != single_smi:
+                in_direct_smi.value = single_smi
 
-                        with ui.element("div").style("display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-top:10px;"):
-                            in_direct_smi = ui.input(
-                                label="SMILES direct (édition rapide)",
-                                value=single_smi,
+            if single_smi != state.get("last_sketcher_smi"):
+                state["last_sketcher_smi"] = single_smi
+                graph_payload = mol_to_graph(single_smi)
+                ui.run_javascript(f"window.csPushGraphToSketcher({json.dumps(graph_payload)});")
+
+            right_card.clear()
+            with right_card:
+                safe_html('<div class="section-kicker">VISUALISATION 3D &amp; CHIMIE COMPUTATIONNELLE</div>')
+                with ui.element("div").classes("sub-tabs").style("margin-top:8px;"):
+                    for m_key, m_lbl in (
+                        ("standard", "Modèle 3D"),
+                        ("quantum", "Quantique (HOMO / LUMO)"),
+                        ("overlay", "Superposition 3D"),
+                    ):
+                        cls = "glass-btn glass-btn-accent" if view_cfg["mode_3d"] == m_key else "glass-btn"
+                        _btn(
+                            m_lbl,
+                            classes=cls,
+                            style="padding:6px 12px;font-size:0.79rem;",
+                            on_click=lambda _e, k=m_key: (view_cfg.update(mode_3d=k), refresh_tab()),
+                        )
+
+                if not mol_main:
+                    safe_html('<p class="muted-text">Structure chimique invalide. Dessinez ou chargez une molécule valide.</p>')
+                    return
+
+                # --- SOUS-MODE 1 : MODÈLE 3D STANDARD ---
+                if view_cfg["mode_3d"] == "standard":
+                    mol_3d = generate_3d_mol(single_smi, force_field=str(view_cfg["ff"]), seed=int(view_cfg["seed"]))
+                    n_at = mol_3d.GetNumAtoms() if mol_3d else 2
+                    ai_clamped = min(max(0, int(view_cfg["bond_ai"])), max(0, n_at - 1))
+                    aj_clamped = min(max(0, int(view_cfg["bond_aj"])), max(0, n_at - 1))
+                    if aj_clamped == ai_clamped and n_at > 1:
+                        aj_clamped = 1 if ai_clamped == 0 else 0
+                    cur_len = get_bond_length_3d(mol_3d, ai_clamped, aj_clamped) if mol_3d else 1.5
+
+                    with ui.expansion("Réglages 3D, Conformères & Distances interatomiques", value=False).style("width:100%;margin-bottom:10px;"):
+                        with ui.element("div").style("display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;"):
+                            sel_st = ui.select(["Ball & Stick", "Stick", "Spacefill"], value=view_cfg["style"], label="Style").props("outlined dense")
+                            sel_ff = ui.select(["MMFF94", "UFF"], value=view_cfg["ff"], label="Champ de force").props("outlined dense")
+                            in_seed = ui.number(label="Conformère #", value=int(view_cfg["seed"]), min=1, max=100, step=1).props("outlined dense")
+
+                        with ui.element("div").style("display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;"):
+                            chk_h = ui.checkbox("Hydrogènes", value=bool(view_cfg["show_h"]))
+                            chk_q = ui.checkbox("Charges Gasteiger (δ+/δ-)", value=bool(view_cfg["charges"]))
+                            chk_spin = ui.checkbox("Rotation continue", value=bool(view_cfg["spin"]))
+
+                        safe_html(f'<div class="muted-small" style="margin-bottom:6px;">Modifier une distance 3D (distance actuelle A{ai_clamped}–A{aj_clamped} : <strong>{cur_len:.2f} Å</strong>)</div>')
+                        with ui.element("div").style("display:grid;grid-template-columns:1fr 1fr 1.3fr auto;gap:8px;align-items:center;"):
+                            in_ai = ui.number(label="Atome A", value=ai_clamped, min=0, max=max(0, n_at - 1), step=1).props("outlined dense")
+                            in_aj = ui.number(label="Atome B", value=aj_clamped, min=0, max=max(0, n_at - 1), step=1).props("outlined dense")
+                            in_d = ui.number(
+                                label="Distance (Å)",
+                                value=float(view_cfg["bond_dist"]) if float(view_cfg["bond_dist"]) > 0 else cur_len,
+                                min=0.8,
+                                max=4.0,
+                                step=0.05,
+                                format="%.2f",
                             ).props("outlined dense")
 
-                            def apply_direct_smi(_e=None):
-                                val = clean_val(in_direct_smi.value)
-                                if not val:
-                                    return
-                                if parse_smiles(val) is None:
-                                    ui.notify("SMILES invalide.", type="negative")
-                                    return
-                                on_molecule_change(val)
-
-                            in_direct_smi.on("keydown.enter", apply_direct_smi)
-                            _btn("Appliquer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=apply_direct_smi)
-
-                    # --- COLONNE DROITE : 3D / QUANTIQUE / SUPERPOSITION ---
-                    with ui.element("div").classes("hud-card"):
-                        safe_html('<div class="section-kicker">VISUALISATION 3D &amp; CHIMIE COMPUTATIONNELLE</div>')
-                        with ui.element("div").classes("sub-tabs").style("margin-top:8px;"):
-                            for m_key, m_lbl in (
-                                ("standard", "Modèle 3D"),
-                                ("quantum", "Quantique (HOMO / LUMO)"),
-                                ("overlay", "Superposition 3D"),
-                            ):
-                                cls = "glass-btn glass-btn-accent" if view_cfg["mode_3d"] == m_key else "glass-btn"
-                                _btn(
-                                    m_lbl,
-                                    classes=cls,
-                                    style="padding:6px 12px;font-size:0.79rem;",
-                                    on_click=lambda _e, k=m_key: (view_cfg.update(mode_3d=k), refresh_tab()),
+                            def apply_3d_settings(_e=None):
+                                view_cfg.update(
+                                    style=str(sel_st.value or "Ball & Stick"),
+                                    ff=str(sel_ff.value or "MMFF94"),
+                                    seed=int(in_seed.value or 42),
+                                    show_h=bool(chk_h.value),
+                                    charges=bool(chk_q.value),
+                                    spin=bool(chk_spin.value),
+                                    bond_ai=int(in_ai.value or 0),
+                                    bond_aj=int(in_aj.value or 1),
+                                    bond_dist=float(in_d.value or 0.0),
                                 )
+                                refresh_tab()
 
-                        if not mol_main:
-                            safe_html('<p class="muted-text">Structure chimique invalide. Dessinez ou chargez une molécule valide.</p>')
-                            return
+                            _btn("Appliquer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=apply_3d_settings)
 
-                        # --- SOUS-MODE 1 : MODÈLE 3D STANDARD ---
-                        if view_cfg["mode_3d"] == "standard":
-                            mol_3d = generate_3d_mol(single_smi, force_field=str(view_cfg["ff"]), seed=int(view_cfg["seed"]))
-                            n_at = mol_3d.GetNumAtoms() if mol_3d else 2
-                            ai_clamped = min(max(0, int(view_cfg["bond_ai"])), max(0, n_at - 1))
-                            aj_clamped = min(max(0, int(view_cfg["bond_aj"])), max(0, n_at - 1))
-                            if aj_clamped == ai_clamped and n_at > 1:
-                                aj_clamped = 1 if ai_clamped == 0 else 0
-                            cur_len = get_bond_length_3d(mol_3d, ai_clamped, aj_clamped) if mol_3d else 1.5
-
-                            with ui.expansion("Réglages 3D, Conformères & Distances interatomiques", value=False).style("width:100%;margin-bottom:10px;"):
-                                with ui.element("div").style("display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;"):
-                                    sel_st = ui.select(["Ball & Stick", "Stick", "Spacefill"], value=view_cfg["style"], label="Style").props("outlined dense")
-                                    sel_ff = ui.select(["MMFF94", "UFF"], value=view_cfg["ff"], label="Champ de force").props("outlined dense")
-                                    in_seed = ui.number(label="Conformère #", value=int(view_cfg["seed"]), min=1, max=100, step=1).props("outlined dense")
-
-                                with ui.element("div").style("display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;"):
-                                    chk_h = ui.checkbox("Hydrogènes", value=bool(view_cfg["show_h"]))
-                                    chk_q = ui.checkbox("Charges Gasteiger (δ+/δ-)", value=bool(view_cfg["charges"]))
-                                    chk_spin = ui.checkbox("Rotation continue", value=bool(view_cfg["spin"]))
-
-                                safe_html(f'<div class="muted-small" style="margin-bottom:6px;">Modifier une distance 3D (distance actuelle A{ai_clamped}–A{aj_clamped} : <strong>{cur_len:.2f} Å</strong>)</div>')
-                                with ui.element("div").style("display:grid;grid-template-columns:1fr 1fr 1.3fr auto;gap:8px;align-items:center;"):
-                                    in_ai = ui.number(label="Atome A", value=ai_clamped, min=0, max=max(0, n_at - 1), step=1).props("outlined dense")
-                                    in_aj = ui.number(label="Atome B", value=aj_clamped, min=0, max=max(0, n_at - 1), step=1).props("outlined dense")
-                                    in_d = ui.number(
-                                        label="Distance (Å)",
-                                        value=float(view_cfg["bond_dist"]) if float(view_cfg["bond_dist"]) > 0 else cur_len,
-                                        min=0.8,
-                                        max=4.0,
-                                        step=0.05,
-                                        format="%.2f",
-                                    ).props("outlined dense")
-
-                                    def apply_3d_settings(_e=None):
-                                        view_cfg.update(
-                                            style=str(sel_st.value or "Ball & Stick"),
-                                            ff=str(sel_ff.value or "MMFF94"),
-                                            seed=int(in_seed.value or 42),
-                                            show_h=bool(chk_h.value),
-                                            charges=bool(chk_q.value),
-                                            spin=bool(chk_spin.value),
-                                            bond_ai=int(in_ai.value or 0),
-                                            bond_aj=int(in_aj.value or 1),
-                                            bond_dist=float(in_d.value or 0.0),
-                                        )
-                                        refresh_tab()
-
-                                    _btn("Appliquer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=apply_3d_settings)
-
-                                for ctrl in (sel_st, sel_ff, in_seed, chk_h, chk_q, chk_spin):
-                                    ctrl.on_value_change(
-                                        lambda _e: (
-                                            view_cfg.update(
-                                                style=str(sel_st.value or "Ball & Stick"),
-                                                ff=str(sel_ff.value or "MMFF94"),
-                                                seed=int(in_seed.value or 42),
-                                                show_h=bool(chk_h.value),
-                                                charges=bool(chk_q.value),
-                                                spin=bool(chk_spin.value),
-                                                bond_dist=0.0,
-                                            ),
-                                            refresh_tab(),
-                                        )
-                                    )
-
-                            q_params = urllib.parse.urlencode({
-                                "smiles": single_smi,
-                                "style": str(view_cfg["style"]),
-                                "ff": str(view_cfg["ff"]),
-                                "seed": int(view_cfg["seed"]),
-                                "show_h": 1 if view_cfg["show_h"] else 0,
-                                "charges": 1 if view_cfg["charges"] else 0,
-                                "spin": 1 if view_cfg["spin"] else 0,
-                                "dark": d_flag,
-                                "ai": int(view_cfg["bond_ai"]) if float(view_cfg["bond_dist"]) > 0 else -1,
-                                "aj": int(view_cfg["bond_aj"]) if float(view_cfg["bond_dist"]) > 0 else -1,
-                                "dist": float(view_cfg["bond_dist"]),
-                            })
-                            safe_html(f'<iframe class="viewer-3d-frame" src="/api/studio/3d/standard?{q_params}" title="Modèle 3D"></iframe>')
-
-                        # --- SOUS-MODE 2 : CHIMIE QUANTIQUE (HOMO / LUMO / ESP) ---
-                        elif view_cfg["mode_3d"] == "quantum":
-                            q_res = compute_quantum_orbitals(mol_main)
-                            mol_3d_q = generate_3d_mol(single_smi)
-                            dip_d = compute_dipole_moment_3d(mol_3d_q) if mol_3d_q else 0.0
-
-                            if not q_res or not mol_3d_q:
-                                safe_html('<p class="muted-text">Calcul quantique indisponible pour cette structure.</p>')
-                                return
-
-                            safe_html(
-                                f"""
-                                <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:10px;">
-                                  <div class="kpi-card"><div class="kpi-label">HOMO</div><div class="kpi-value" style="font-size:1.05rem;color:var(--cyan);">{q_res['e_homo']} eV</div></div>
-                                  <div class="kpi-card"><div class="kpi-label">LUMO</div><div class="kpi-value" style="font-size:1.05rem;color:var(--accent);">{q_res['e_lumo']} eV</div></div>
-                                  <div class="kpi-card"><div class="kpi-label">Gap ΔE</div><div class="kpi-value" style="font-size:1.05rem;">{q_res['gap']} eV</div></div>
-                                  <div class="kpi-card"><div class="kpi-label">Dipôle</div><div class="kpi-value" style="font-size:1.05rem;">{dip_d} D</div></div>
-                                </div>
-                                """
+                        for ctrl in (sel_st, sel_ff, in_seed, chk_h, chk_q, chk_spin):
+                            ctrl.on_value_change(
+                                lambda _e: (
+                                    view_cfg.update(
+                                        style=str(sel_st.value or "Ball & Stick"),
+                                        ff=str(sel_ff.value or "MMFF94"),
+                                        seed=int(in_seed.value or 42),
+                                        show_h=bool(chk_h.value),
+                                        charges=bool(chk_q.value),
+                                        spin=bool(chk_spin.value),
+                                        bond_dist=0.0,
+                                    ),
+                                    refresh_tab(),
+                                )
                             )
-                            with ui.element("div").style("display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-bottom:10px;"):
-                                surf_opts = {
-                                    "HOMO": "HOMO (Orbitale Haute Occupée)",
-                                    "LUMO": "LUMO (Orbitale Basse Vacante)",
-                                    "ESP": "Potentiel Électrostatique (Surface ESP)",
-                                }
-                                sel_surf = ui.select(
-                                    surf_opts,
-                                    value=str(view_cfg["quantum_surface"]),
-                                    label="Surface quantique",
-                                ).props("outlined dense")
-                                sel_surf.on_value_change(
-                                    lambda e: (view_cfg.update(quantum_surface=str(e.value or "HOMO")), refresh_tab())
-                                )
-                                _btn(
-                                    "Table de Fukui",
-                                    style="height:40px;",
-                                    on_click=lambda _e, rows=q_res["fukui_rows"], om=q_res["omega"]: open_fukui_modal(rows, om),
-                                )
 
-                            q_params = urllib.parse.urlencode({
-                                "smiles": single_smi,
-                                "mode": str(view_cfg["quantum_surface"]),
-                                "dark": d_flag,
-                            })
-                            safe_html(f'<iframe class="viewer-3d-frame" style="height:370px;" src="/api/studio/3d/quantum?{q_params}" title="Orbitale 3D"></iframe>')
+                    q_params = urllib.parse.urlencode({
+                        "smiles": single_smi,
+                        "style": str(view_cfg["style"]),
+                        "ff": str(view_cfg["ff"]),
+                        "seed": int(view_cfg["seed"]),
+                        "show_h": 1 if view_cfg["show_h"] else 0,
+                        "charges": 1 if view_cfg["charges"] else 0,
+                        "spin": 1 if view_cfg["spin"] else 0,
+                        "dark": d_flag,
+                        "ai": int(view_cfg["bond_ai"]) if float(view_cfg["bond_dist"]) > 0 else -1,
+                        "aj": int(view_cfg["bond_aj"]) if float(view_cfg["bond_dist"]) > 0 else -1,
+                        "dist": float(view_cfg["bond_dist"]),
+                    })
+                    safe_html(f'<iframe class="viewer-3d-frame" src="/api/studio/3d/standard?{q_params}" title="Modèle 3D"></iframe>')
 
-                        # --- SOUS-MODE 3 : SUPERPOSITION 3D (MCS / RMSD) ---
-                        else:
-                            hist = list(state.get("history", []))
-                            default_ref = hist[1] if len(hist) > 1 else (hist[0] if hist else single_smi)
-                            if not view_cfg["overlay_target"] or view_cfg["overlay_target"] not in hist:
-                                view_cfg["overlay_target"] = default_ref
+                # --- SOUS-MODE 2 : CHIMIE QUANTIQUE (HOMO / LUMO / ESP) ---
+                elif view_cfg["mode_3d"] == "quantum":
+                    q_res = compute_quantum_orbitals(mol_main)
+                    mol_3d_q = generate_3d_mol(single_smi)
+                    dip_d = compute_dipole_moment_3d(mol_3d_q) if mol_3d_q else 0.0
 
-                            with ui.element("div").style("display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;margin-bottom:10px;"):
-                                sel_hist = ui.select(hist, value=view_cfg["overlay_target"], label="2e molécule (historique)").props("outlined dense")
-                                in_cust = ui.input(
-                                    label="Ou CAS / Nom / SMILES",
-                                    value=str(view_cfg["overlay_custom"]),
-                                    placeholder="Ex : Ibuprofen",
-                                ).props("outlined dense")
+                    if not q_res or not mol_3d_q:
+                        safe_html('<p class="muted-text">Calcul quantique indisponible pour cette structure.</p>')
+                        return
 
-                                async def run_overlay_lookup(_e=None):
-                                    cust = clean_val(in_cust.value)
-                                    view_cfg["overlay_custom"] = cust
-                                    if cust:
-                                        resolved = await run.io_bound(resolve_query_to_smiles, cust)
-                                        if not resolved:
-                                            ui.notify("2e composé introuvable dans PubChem.", type="warning")
-                                            return
-                                        view_cfg["overlay_target"] = resolved
-                                    else:
-                                        view_cfg["overlay_target"] = str(sel_hist.value or default_ref)
-                                    refresh_tab()
+                    safe_html(
+                        f"""
+                        <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:10px;">
+                          <div class="kpi-card"><div class="kpi-label">HOMO</div><div class="kpi-value" style="font-size:1.05rem;color:var(--cyan);">{q_res['e_homo']} eV</div></div>
+                          <div class="kpi-card"><div class="kpi-label">LUMO</div><div class="kpi-value" style="font-size:1.05rem;color:var(--accent);">{q_res['e_lumo']} eV</div></div>
+                          <div class="kpi-card"><div class="kpi-label">Gap ΔE</div><div class="kpi-value" style="font-size:1.05rem;">{q_res['gap']} eV</div></div>
+                          <div class="kpi-card"><div class="kpi-label">Dipôle</div><div class="kpi-value" style="font-size:1.05rem;">{dip_d} D</div></div>
+                        </div>
+                        """
+                    )
+                    with ui.element("div").style("display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-bottom:10px;"):
+                        surf_opts = {
+                            "HOMO": "HOMO (Orbitale Haute Occupée)",
+                            "LUMO": "LUMO (Orbitale Basse Vacante)",
+                            "ESP": "Potentiel Électrostatique (Surface ESP)",
+                        }
+                        sel_surf = ui.select(
+                            surf_opts,
+                            value=str(view_cfg["quantum_surface"]),
+                            label="Surface quantique",
+                        ).props("outlined dense")
+                        sel_surf.on_value_change(
+                            lambda e: (view_cfg.update(quantum_surface=str(e.value or "HOMO")), refresh_tab())
+                        )
+                        _btn(
+                            "Table de Fukui",
+                            style="height:40px;",
+                            on_click=lambda _e, rows=q_res["fukui_rows"], om=q_res["omega"]: open_fukui_modal(rows, om),
+                        )
 
-                                sel_hist.on_value_change(
-                                    lambda e: (view_cfg.update(overlay_target=str(e.value or default_ref), overlay_custom=""), refresh_tab())
-                                )
-                                _btn("Superposer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=run_overlay_lookup)
+                    q_params = urllib.parse.urlencode({
+                        "smiles": single_smi,
+                        "mode": str(view_cfg["quantum_surface"]),
+                        "dark": d_flag,
+                    })
+                    safe_html(f'<iframe class="viewer-3d-frame" style="height:385px;" src="/api/studio/3d/quantum?{q_params}" title="Orbitale 3D"></iframe>')
 
-                            target_s2 = clean_val(view_cfg["overlay_target"]) or default_ref
-                            m1_ov, m2_ov, mcs_atoms, rmsd_val = overlay_molecules_3d(single_smi, target_s2)
-                            if m1_ov and m2_ov:
-                                rmsd_txt = f"{rmsd_val:.3f} Å" if rmsd_val is not None else "N/A"
-                                safe_html(
-                                    f"""
-                                    <div class="kpi-grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px;">
-                                      <div class="kpi-card"><div class="kpi-label">Squelette commun (MCS)</div><div class="kpi-value" style="font-size:1.05rem;color:var(--accent);">{mcs_atoms} atomes</div></div>
-                                      <div class="kpi-card"><div class="kpi-label">Écart RMSD 3D (Vert vs Cyan)</div><div class="kpi-value" style="font-size:1.05rem;color:var(--cyan);">{rmsd_txt}</div></div>
-                                    </div>
-                                    """
-                                )
-                                q_params = urllib.parse.urlencode({"s1": single_smi, "s2": target_s2, "dark": d_flag})
-                                safe_html(f'<iframe class="viewer-3d-frame" style="height:370px;" src="/api/studio/3d/overlay?{q_params}" title="Superposition 3D"></iframe>')
+                # --- SOUS-MODE 3 : SUPERPOSITION 3D (MCS / RMSD) ---
+                else:
+                    hist = list(state.get("history", []))
+                    default_ref = hist[1] if len(hist) > 1 else (hist[0] if hist else single_smi)
+                    if not view_cfg["overlay_target"] or view_cfg["overlay_target"] not in hist:
+                        view_cfg["overlay_target"] = default_ref
+
+                    with ui.element("div").style("display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center;margin-bottom:10px;"):
+                        sel_hist = ui.select(hist, value=view_cfg["overlay_target"], label="2e molécule (historique)").props("outlined dense")
+                        in_cust = ui.input(
+                            label="Ou CAS / Nom / SMILES",
+                            value=str(view_cfg["overlay_custom"]),
+                            placeholder="Ex : Ibuprofen",
+                        ).props("outlined dense")
+
+                        async def run_overlay_lookup(_e=None):
+                            cust = clean_val(in_cust.value)
+                            view_cfg["overlay_custom"] = cust
+                            if cust:
+                                resolved = await run.io_bound(resolve_query_to_smiles, cust)
+                                if not resolved:
+                                    ui.notify("2e composé introuvable dans PubChem.", type="warning")
+                                    return
+                                view_cfg["overlay_target"] = resolved
                             else:
-                                safe_html('<p class="muted-text">Impossible de générer la superposition 3D pour ces deux structures.</p>')
+                                view_cfg["overlay_target"] = str(sel_hist.value or default_ref)
+                            refresh_tab()
+
+                        sel_hist.on_value_change(
+                            lambda e: (view_cfg.update(overlay_target=str(e.value or default_ref), overlay_custom=""), refresh_tab())
+                        )
+                        _btn("Superposer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=run_overlay_lookup)
+
+                    target_s2 = clean_val(view_cfg["overlay_target"]) or default_ref
+                    m1_ov, m2_ov, mcs_atoms, rmsd_val = overlay_molecules_3d(single_smi, target_s2)
+                    if m1_ov and m2_ov:
+                        rmsd_txt = f"{rmsd_val:.3f} Å" if rmsd_val is not None else "N/A"
+                        safe_html(
+                            f"""
+                            <div class="kpi-grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px;">
+                              <div class="kpi-card"><div class="kpi-label">Squelette commun (MCS)</div><div class="kpi-value" style="font-size:1.05rem;color:var(--accent);">{mcs_atoms} atomes</div></div>
+                              <div class="kpi-card"><div class="kpi-label">Écart RMSD 3D (Vert vs Cyan)</div><div class="kpi-value" style="font-size:1.05rem;color:var(--cyan);">{rmsd_txt}</div></div>
+                            </div>
+                            """
+                        )
+                        q_params = urllib.parse.urlencode({"s1": single_smi, "s2": target_s2, "dark": d_flag})
+                        safe_html(f'<iframe class="viewer-3d-frame" style="height:385px;" src="/api/studio/3d/overlay?{q_params}" title="Superposition 3D"></iframe>')
+                    else:
+                        safe_html('<p class="muted-text">Impossible de générer la superposition 3D pour ces deux structures.</p>')
 
         refresh_tab()
         return refresh_tab
@@ -356,7 +374,7 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
             "sub": "stoich",  # stoich | retro | markush
             "ref_mass_mg": 500.0,
             "exp_mass_mg": 0.0,
-            "row_params": {},  # key -> {"eq": float, "dens": float}
+            "row_params": {},
             "markush_mode": "similarity",
             "markush_thresh": 85,
             "markush_max": 6,
@@ -466,7 +484,6 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                                     format="%.1f",
                                 ).props("outlined dense").style("width:100%;")
 
-                        # Construction des entrées de la grille
                         entries: list[dict[str, Any]] = []
                         for idx, smi in enumerate(r_list):
                             m = parse_smiles(smi)
@@ -501,7 +518,6 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                                 "exact_mw": float(Descriptors.ExactMolWt(m)),
                             })
 
-                        # Emplacements réactifs mis à jour en temps réel
                         name_slots: dict[str, Any] = {}
                         calc_slots: dict[str, Any] = {}
                         kpi_slot = ui.element("div").style("margin-top:14px;")

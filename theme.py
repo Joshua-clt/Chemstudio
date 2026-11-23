@@ -120,7 +120,6 @@ html, body {
   max-width: none !important;
 }
 
-/* Transition onde circulaire */
 ::view-transition-old(root),
 ::view-transition-new(root) {
   animation: none;
@@ -202,7 +201,6 @@ html, body {
   flex-wrap: wrap;
 }
 
-/* Boutons Liquid Glass */
 .glass-btn {
   display: inline-flex;
   align-items: center;
@@ -256,7 +254,6 @@ html[data-theme="dark"] .icon-moon { display: none; }
 html[data-theme="light"] .icon-sun { display: none; }
 html[data-theme="light"] .icon-moon { display: block; }
 
-/* Navigation à pilule glissante */
 .lg-nav {
   position: relative;
   display: inline-flex;
@@ -312,7 +309,6 @@ html[data-theme="light"] .icon-moon { display: block; }
   background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
 }
 
-/* Cartes & Grilles */
 .hud-card {
   background: var(--card-glass);
   backdrop-filter: blur(18px) saturate(160%);
@@ -405,7 +401,6 @@ html[data-theme="light"] .icon-moon { display: block; }
   word-break: break-word;
 }
 
-/* Badges & Pills */
 .mono-tag {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.72rem;
@@ -472,7 +467,6 @@ html[data-theme="light"] .icon-moon { display: block; }
 .status-warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
 .status-err { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
 
-/* Zone SVG & 3D & JSME */
 .svg-box {
   background: var(--svg-bg);
   border: 1px solid var(--border);
@@ -509,20 +503,20 @@ html[data-theme="dark"] .svg-box-adaptive svg {
 
 .viewer-3d-frame {
   width: 100%;
-  height: 455px;
+  height: 465px;
   border: 1px solid var(--border);
   border-radius: 13px;
   background: var(--sub-card);
 }
-.jsme-frame {
+.sketcher-frame {
   width: 100%;
-  height: 495px;
+  height: 520px;
   border: 1px solid var(--border);
-  border-radius: 13px;
-  background: #ffffff;
+  border-radius: 14px;
+  background: var(--sub-card);
+  display: block;
 }
 
-/* Sous-onglets internes */
 .sub-tabs {
   display: flex;
   gap: 8px;
@@ -530,7 +524,6 @@ html[data-theme="dark"] .svg-box-adaptive svg {
   margin-bottom: 14px;
 }
 
-/* Tableaux propres */
 .data-table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -562,7 +555,6 @@ html[data-theme="dark"] .svg-box-adaptive svg {
   border-bottom: none;
 }
 
-/* Modales */
 .cb-modal-card {
   width: min(640px, 94vw) !important;
   max-width: 94vw !important;
@@ -616,13 +608,37 @@ html[data-theme="dark"] .svg-box-adaptive svg {
 </style>
 
 <script>
+window.csPushThemeToSketcher = function(isDark) {
+  const f = document.getElementById("cs-sketcher-iframe");
+  if (f && f.contentWindow) {
+    f.contentWindow.postMessage({ type: "cs_set_theme", dark: !!isDark }, "*");
+  }
+};
+
+window.csPushGraphToSketcher = function(graphObj) {
+  const f = document.getElementById("cs-sketcher-iframe");
+  if (f && f.contentWindow && graphObj) {
+    f.contentWindow.postMessage({ type: "cs_load_graph", graph: graphObj }, "*");
+  }
+};
+
+window.csPushSketcherStatus = function(ok, text) {
+  const f = document.getElementById("cs-sketcher-iframe");
+  if (f && f.contentWindow) {
+    f.contentWindow.postMessage({ type: "cs_sketcher_status", ok: !!ok, text: text || "" }, "*");
+  }
+};
+
 window.cbApplyTheme = function(mode) {
-  document.documentElement.setAttribute("data-theme", mode === "light" ? "light" : "dark");
+  const isLight = mode === "light";
+  document.documentElement.setAttribute("data-theme", isLight ? "light" : "dark");
+  window.csPushThemeToSketcher(!isLight);
 };
 
 window.cbToggleThemeWave = function(mode) {
   const target = mode === "light" ? "light" : "dark";
   const btn = document.getElementById("theme-toggle");
+  window.csPushThemeToSketcher(target !== "light");
   if (!document.startViewTransition || !btn) {
     window.cbApplyTheme(target);
     return;
@@ -676,10 +692,10 @@ window.cbCopyText = function(text, label) {
 
 window.addEventListener("resize", () => window.cbMovePill(true));
 
-// Pont postMessage pour l'éditeur 2D JSME -> NiceGUI
+// Pont temps réel du dessinateur 2D maison -> NiceGUI
 window.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "jsme_smiles" && typeof emitEvent === "function") {
-    emitEvent("jsme_smiles_applied", { smiles: event.data.smiles || "" });
+  if (event.data && event.data.type === "cs_sketcher_change" && typeof emitEvent === "function") {
+    emitEvent("cs_sketcher_change", { graph: event.data.graph || {} });
   }
 });
 </script>

@@ -2,10 +2,14 @@ import base64
 import html
 import json
 import os
+import threading
+import time
 from typing import Any
 
-from fastapi.responses import HTMLResponse
+from fastapi import Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from nicegui import app, run, ui
+import requests
 from rdkit import Chem
 
 from chem_engine import (
@@ -14,7 +18,6 @@ from chem_engine import (
     build_3dmol_quantum_html,
     build_3dmol_standard_html,
     build_chembase_send_url,
-    build_jsme_editor_html,
     clean_val,
     compute_quantum_orbitals,
     estimate_chemprop,
@@ -29,12 +32,14 @@ from chem_engine import (
     resolve_query_to_smiles,
     set_bond_length_3d,
 )
+from sketcher_2d import build_custom_sketcher_html, clean_graph_2d, graph_to_smiles
 from theme import LOGO_SVG, THEME_TOGGLE_SVGS, inject_theme, safe_html
 from views_spec_export import build_spec_and_export_views
 from views_studio import build_studio_views
 
 IS_RENDER = os.environ.get("RENDER") is not None
 STORAGE_SECRET = os.environ.get("STORAGE_SECRET", "chemstudio-ultra-2026")
+_LAST_WAKE_PING = 0.0
 
 DEFAULT_FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">'
@@ -57,12 +62,49 @@ def get_favicon_data_uri() -> str:
     return f"data:image/svg+xml;base64,{b64}"
 
 
+def _wake_chembase_async(base_url: str):
+    """Réveille silencieusement ChemBase sur Render (au plus une fois toutes les 5 min)."""
+    global _LAST_WAKE_PING
+    url_clean = clean_val(base_url).rstrip("/")
+    if not url_clean:
+        return
+    now = time.time()
+    if now - _LAST_WAKE_PING < 300:
+        return
+    _LAST_WAKE_PING = now
+
+    def _ping():
+        try:
+            requests.get(f"{url_clean}/api/ping", timeout=15)
+        except Exception:
+            pass
+
+    threading.Thread(target=_ping, daemon=True).start()
+
+
 # ------------------------------------------------------------------
-# ROUTES FASTAPI : ÉDITEUR 2D JSME & VISUALISEURS 3DMOL.JS RESPONSIVES
+# ROUTES FASTAPI : PING, DESSINATEUR 2D MAISON & VISUALISEURS 3DMOL
 # ------------------------------------------------------------------
-@app.get("/api/studio/jsme", response_class=HTMLResponse)
-def serve_jsme_editor(smiles: str = "", dark: int = 1):
-    return HTMLResponse(content=build_jsme_editor_html(clean_val(smiles), dark_mode=bool(dark)))
+@app.get("/api/ping")
+def api_ping():
+    return JSONResponse(content={"ok": True, "app": "ChemStudio"})
+
+
+@app.get("/api/studio/sketcher", response_class=HTMLResponse)
+def serve_custom_sketcher(smiles: str = "", dark: int = 1):
+    return HTMLResponse(content=build_custom_sketcher_html(clean_val(smiles), dark_mode=bool(dark)))
+
+
+@app.post("/api/studio/clean2d")
+async def api_clean_2d(request: Request):
+    try:
+        graph = await request.json()
+        cleaned, smi, msg = clean_graph_2d(graph if isinstance(graph, dict) else {})
+        if cleaned is None:
+            return JSONResponse(content={"ok": False, "message": msg})
+        return JSONResponse(content={"ok": True, "graph": cleaned, "smiles": smi, "message": msg})
+    except Exception as ex:
+        return JSONResponse(content={"ok": False, "message": f"Erreur : {ex}"})
 
 
 @app.get("/api/studio/3d/standard", response_class=HTMLResponse)
@@ -148,6 +190,7 @@ def index_page(smiles: str = "", cas: str = ""):
         "tab": "t2d3d",
         "dark": saved_dark,
         "current_smiles": initial_smi,
+        "last_sketcher_smi": initial_smi,
         "history": [
             "CC(=O)OC1=CC=CC=C1C(=O)O",
             "CC(=O)NC1=CC=C(O)C=C1",
@@ -159,6 +202,7 @@ def index_page(smiles: str = "", cas: str = ""):
         "ident": {"iupac": "Chargement...", "cas": "...", "trivial": "Chargement...", "cid": None},
         "chembase_match": None,
         "ident_seq": 0,
+        "pubchem_timer": None,
     }
     if initial_smi not in state["history"]:
         state["history"].insert(0, initial_smi)
@@ -173,6 +217,11 @@ def index_page(smiles: str = "", cas: str = ""):
         r_part = ".".join(state["rxn_reactants"]) if state["rxn_reactants"] else "CC(=O)O"
         p_part = ".".join(state["rxn_products"]) if state["rxn_products"] else "CC(=O)OCC"
         state["rxn_smiles"] = f"{r_part}>>{p_part}"
+
+    # Réveil croisé silencieux de ChemBase sur Render
+    cb_url_boot, _cb_key_boot = get_cb_creds()
+    if cb_url_boot:
+        _wake_chembase_async(cb_url_boot)
 
     init_mode = "dark" if saved_dark else "light"
     ui.timer(0.05, lambda: ui.run_javascript(f'window.cbApplyTheme("{init_mode}");'), once=True)
@@ -377,7 +426,7 @@ def index_page(smiles: str = "", cas: str = ""):
             state["chembase_match"] = cb_match
             render_molecule_banner()
 
-        def set_active_molecule(new_smiles: str, switch_to_2d: bool = False):
+        def set_active_molecule(new_smiles: str, switch_to_2d: bool = False, from_sketcher: bool = False):
             raw = clean_val(new_smiles)
             if not raw:
                 return
@@ -401,6 +450,12 @@ def index_page(smiles: str = "", cas: str = ""):
                 single = Chem.MolToSmiles(m, canonical=True)
 
             state["current_smiles"] = single
+            if from_sketcher:
+                state["last_sketcher_smi"] = single
+            else:
+                # Force la mise à jour de la toile 2D lors d'un chargement externe
+                state["last_sketcher_smi"] = ""
+
             if single not in state["history"]:
                 state["history"].insert(0, single)
                 state["history"] = state["history"][:16]
@@ -417,21 +472,45 @@ def index_page(smiles: str = "", cas: str = ""):
                 ref = tab_refreshers.get(state["tab"])
                 if callable(ref):
                     ref()
-            ui.timer(0.05, lambda: resolve_banner_async(single, seq_now), once=True)
 
-        # Réception des dessins depuis l'éditeur 2D JSME
-        def handle_jsme_apply(e):
-            smi = clean_val((e.args or {}).get("smiles", "")) if isinstance(e.args, dict) else ""
-            if smi:
-                set_active_molecule(smi)
-                ui.notify("Structure appliquée depuis l'éditeur 2D JSME.", type="positive")
+            # Double cadence : différé (0.85 s) lors du dessin en direct, quasi-immédiat sinon
+            prev_timer = state.get("pubchem_timer")
+            if prev_timer is not None:
+                try:
+                    prev_timer.cancel()
+                except Exception:
+                    pass
+            delay_s = 0.85 if from_sketcher else 0.08
+            state["pubchem_timer"] = ui.timer(
+                delay_s,
+                lambda s=single, sid=seq_now: resolve_banner_async(s, sid),
+                once=True,
+            )
 
-        ui.on("jsme_smiles_applied", handle_jsme_apply)
+        # Réception en temps réel depuis la toile 2D maison
+        def handle_sketcher_change(e):
+            graph = (e.args or {}).get("graph", {}) if isinstance(e.args, dict) else {}
+            if not isinstance(graph, dict):
+                return
+            smi, msg = graph_to_smiles(graph)
+            if not smi:
+                state["last_sketcher_smi"] = ""
+                ui.run_javascript(f"window.csPushSketcherStatus(false, {json.dumps(msg)});")
+                return
+
+            ui.run_javascript('window.csPushSketcherStatus(true, "Valence OK");')
+            cur_single = extract_single_smiles(state["current_smiles"])
+            if smi == cur_single:
+                state["last_sketcher_smi"] = smi
+                return
+            set_active_molecule(smi, switch_to_2d=False, from_sketcher=True)
+
+        ui.on("cs_sketcher_change", handle_sketcher_change)
 
         # --- CONTENU DES 5 ONGLETS ---
         render_t2d3d, render_trxn, render_tstruct = build_studio_views(
             state,
-            on_molecule_change=lambda s: set_active_molecule(s, switch_to_2d=True),
+            on_molecule_change=lambda s: set_active_molecule(s, switch_to_2d=True, from_sketcher=False),
             on_basket_change=refresh_header_badges,
         )
         render_tspec, render_texport = build_spec_and_export_views(state)
@@ -598,8 +677,10 @@ def index_page(smiles: str = "", cas: str = ""):
                         ).props("outlined dense")
 
                         def save_cb_cfg(_e=None):
-                            app.storage.user["chembase_url"] = clean_val(in_cb_url.value).rstrip("/")
+                            new_u = clean_val(in_cb_url.value).rstrip("/")
+                            app.storage.user["chembase_url"] = new_u
                             app.storage.user["chembase_api_key"] = clean_val(in_cb_key.value)
+                            _wake_chembase_async(new_u)
                             refresh_header_badges()
                             render_molecule_banner()
                             ui.notify("Paramètres ChemBase enregistrés pour cette session.", type="positive")
@@ -664,7 +745,7 @@ def index_page(smiles: str = "", cas: str = ""):
         safe_html(
             """
             <footer class="app-footer">
-              <span>CHEMSTUDIO v2.0 · RDKIT + NICEGUI (LIQUID GLASS)</span>
+              <span>CHEMSTUDIO v2.0 · RDKIT + DESSINATEUR 2D LIQUID GLASS</span>
               <span>CONNECTÉ À CHEMBASE v2.0 VIA API REST SÉCURISÉE</span>
             </footer>
             """
@@ -674,7 +755,6 @@ def index_page(smiles: str = "", cas: str = ""):
     render_molecule_banner()
     ui.timer(0.08, lambda: ui.run_javascript("window.cbMovePill(true);"), once=True)
 
-    # Résolution initiale (ou depuis paramètre ?cas=...)
     async def boot_resolve():
         if clean_val(cas) and not clean_val(smiles):
             found = await run.io_bound(resolve_query_to_smiles, clean_val(cas))
