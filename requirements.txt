@@ -1,8 +1,4 @@
-streamlit
-streamlit-ketcher
+nicegui
 rdkit
-requests
-py3Dmol
-pandas
-pillow
 numpy
+requests
