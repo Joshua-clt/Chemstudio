@@ -21,7 +21,7 @@ from rdkit.Chem import (
     rdMolDescriptors,
     rdMolTransforms,
 )
-from rdkit.Chem.Draw import rdMolDraw2D
+from rdkit.Chem.Draw import rdMolDraw2D # type: ignore
 from rdkit.Chem.MolStandardize import rdMolStandardize
 
 EXEMPLES_MOLECULES: dict[str, str] = {
@@ -846,7 +846,7 @@ def simulate_advanced_nmr_1d_2d(mol) -> tuple[list[dict[str, Any]], list[dict[st
         if atom.GetSymbol() == "C":
             c_groups.setdefault(ranks[idx], []).append(atom)
 
-    for _r, atoms in c_groups.items():
+    for atoms in c_groups.values():
         env = "Aliphatique"
         for a in atoms:
             idx = a.GetIdx()
@@ -912,7 +912,7 @@ def simulate_advanced_nmr_1d_2d(mol) -> tuple[list[dict[str, Any]], list[dict[st
             h_groups.setdefault(ranks[idx], []).append(atom)
 
     mult_names = {0: "s (singulet)", 1: "d (doublet)", 2: "t (triplet)", 3: "q (quadruplet)"}
-    for _r, h_atoms in h_groups.items():
+    for h_atoms in h_groups.values():
         h0 = h_atoms[0]
         parent = h0.GetNeighbors()[0]
         p_idx, p_sym = parent.GetIdx(), parent.GetSymbol()
@@ -1100,7 +1100,7 @@ def calc_isotopic_spectrum(mol) -> tuple[list[dict[str, Any]], list[dict[str, An
         new_dist: dict[int, tuple[float, float]] = {}
         for shift_old, (m_old, p_old) in dist.items():
             for m_iso, p_iso in isotopes:
-                shift_add = int(round(m_iso - base_m))
+                shift_add = round(m_iso - base_m)
                 s_tot = shift_old + shift_add
                 p_new = p_old * p_iso
                 if p_new > 1e-6:

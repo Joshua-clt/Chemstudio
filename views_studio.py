@@ -659,7 +659,7 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                                                     on_click=lambda _e, s=p_smi: on_molecule_change(s),
                                                 )
 
-                                        def load_route_stoich(_e=None, precs=list(rt["precursors"])):
+                                        def load_route_stoich(_e=None, precs=tuple(rt["precursors"])):
                                             state["rxn_reactants"] = list(precs)
                                             state["rxn_products"] = [Chem.MolToSmiles(mol_main, canonical=True)]
                                             _sync_rxn_smiles(state)

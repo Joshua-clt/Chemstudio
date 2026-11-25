@@ -622,10 +622,13 @@ window.csPushGraphToSketcher = function(graphObj) {
   }
 };
 
-window.csPushSketcherStatus = function(ok, text) {
+window.csPushSketcherStatus = function(ok, text, invalidIds, smiles) {
   const f = document.getElementById("cs-sketcher-iframe");
   if (f && f.contentWindow) {
-    f.contentWindow.postMessage({ type: "cs_sketcher_status", ok: !!ok, text: text || "" }, "*");
+    f.contentWindow.postMessage(
+      { type: "cs_sketcher_status", ok: !!ok, text: text || "", invalidIds: invalidIds || [], smiles: smiles || "" },
+      "*"
+    );
   }
 };
 
@@ -692,10 +695,318 @@ window.cbCopyText = function(text, label) {
 
 window.addEventListener("resize", () => window.cbMovePill(true));
 
-// Pont temps réel du dessinateur 2D maison -> NiceGUI
+// === Toast rapide, export PNG/SVG & Tableau Périodique plein écran ===
+window.csToast = function(msg) {
+  let t = document.getElementById("cs-float-toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "cs-float-toast";
+    t.style.cssText = "position:fixed;bottom:22px;right:22px;z-index:10050;padding:10px 16px;border-radius:12px;font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;font-weight:600;color:#e6edf3;background:rgba(10,20,24,0.94);border:1px solid rgba(56,189,248,0.5);box-shadow:0 12px 32px rgba(0,0,0,0.45);backdrop-filter:blur(12px);transition:opacity 0.25s ease;pointer-events:none;";
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = "1";
+  clearTimeout(t._tm);
+  t._tm = setTimeout(() => { t.style.opacity = "0"; }, 2400);
+};
+
+window.csDownloadSvg = function(svgText) {
+  const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "molecule_chemstudio.svg";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  window.csToast("Fichier molecule_chemstudio.svg téléchargé");
+};
+
+window.csCopySvgAsPng = async function(svgText) {
+  const makeBlob = () => new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth || img.width || 300;
+      const h = img.naturalHeight || img.height || 240;
+      const c = document.createElement("canvas");
+      const dpr = 3;
+      c.width = Math.round(w * dpr);
+      c.height = Math.round(h * dpr);
+      const ctx = c.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.drawImage(img, 0, 0, w, h);
+      c.toBlob(b => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png");
+    };
+    img.onerror = () => reject(new Error("SVG load failed"));
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgText);
+  });
+
+  try {
+    if (navigator.clipboard && typeof window.ClipboardItem === "function") {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": makeBlob() })]);
+      window.csToast("Image transparente HD copiée (prête pour Word)");
+      return;
+    }
+  } catch (_err) {
+    // Secours : téléchargement direct en PNG transparent si le navigateur bloque le presse-papiers
+  }
+  try {
+    const blob = await makeBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "molecule_chemstudio.png";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    window.csToast("Image PNG transparente téléchargée (insérable dans Word)");
+  } catch (_e2) {
+    window.csToast("Impossible de générer l'image PNG");
+  }
+};
+
+window.csOpenPeriodicTable = (function() {
+  const PT_DATA = [
+    [1,"H","Hydrogène",1,1,"nm"],[2,"He","Hélium",18,1,"ng"],
+    [3,"Li","Lithium",1,2,"alk"],[4,"Be","Béryllium",2,2,"ae"],[5,"B","Bore",13,2,"mt"],[6,"C","Carbone",14,2,"nm"],[7,"N","Azote",15,2,"nm"],[8,"O","Oxygène",16,2,"nm"],[9,"F","Fluor",17,2,"hal"],[10,"Ne","Néon",18,2,"ng"],
+    [11,"Na","Sodium",1,3,"alk"],[12,"Mg","Magnésium",2,3,"ae"],[13,"Al","Aluminium",13,3,"pm"],[14,"Si","Silicium",14,3,"mt"],[15,"P","Phosphore",15,3,"nm"],[16,"S","Soufre",16,3,"nm"],[17,"Cl","Chlore",17,3,"hal"],[18,"Ar","Argon",18,3,"ng"],
+    [19,"K","Potassium",1,4,"alk"],[20,"Ca","Calcium",2,4,"ae"],[21,"Sc","Scandium",3,4,"tm"],[22,"Ti","Titane",4,4,"tm"],[23,"V","Vanadium",5,4,"tm"],[24,"Cr","Chrome",6,4,"tm"],[25,"Mn","Manganèse",7,4,"tm"],[26,"Fe","Fer",8,4,"tm"],[27,"Co","Cobalt",9,4,"tm"],[28,"Ni","Nickel",10,4,"tm"],[29,"Cu","Cuivre",11,4,"tm"],[30,"Zn","Zinc",12,4,"tm"],[31,"Ga","Gallium",13,4,"pm"],[32,"Ge","Germanium",14,4,"mt"],[33,"As","Arsenic",15,4,"mt"],[34,"Se","Sélénium",16,4,"nm"],[35,"Br","Brome",17,4,"hal"],[36,"Kr","Krypton",18,4,"ng"],
+    [37,"Rb","Rubidium",1,5,"alk"],[38,"Sr","Strontium",2,5,"ae"],[39,"Y","Yttrium",3,5,"tm"],[40,"Zr","Zirconium",4,5,"tm"],[41,"Nb","Niobium",5,5,"tm"],[42,"Mo","Molybdène",6,5,"tm"],[43,"Tc","Technétium",7,5,"tm"],[44,"Ru","Ruthénium",8,5,"tm"],[45,"Rh","Rhodium",9,5,"tm"],[46,"Pd","Palladium",10,5,"tm"],[47,"Ag","Argent",11,5,"tm"],[48,"Cd","Cadmium",12,5,"tm"],[49,"In","Indium",13,5,"pm"],[50,"Sn","Étain",14,5,"pm"],[51,"Sb","Antimoine",15,5,"mt"],[52,"Te","Tellure",16,5,"mt"],[53,"I","Iode",17,5,"hal"],[54,"Xe","Xénon",18,5,"ng"],
+    [55,"Cs","Césium",1,6,"alk"],[56,"Ba","Baryum",2,6,"ae"],[72,"Hf","Hafnium",4,6,"tm"],[73,"Ta","Tantale",5,6,"tm"],[74,"W","Tungstène",6,6,"tm"],[75,"Re","Rhénium",7,6,"tm"],[76,"Os","Osmium",8,6,"tm"],[77,"Ir","Iridium",9,6,"tm"],[78,"Pt","Platine",10,6,"tm"],[79,"Au","Or",11,6,"tm"],[80,"Hg","Mercure",12,6,"tm"],[81,"Tl","Thallium",13,6,"pm"],[82,"Pb","Plomb",14,6,"pm"],[83,"Bi","Bismuth",15,6,"pm"],[84,"Po","Polonium",16,6,"mt"],[85,"At","Astate",17,6,"hal"],[86,"Rn","Radon",18,6,"ng"],
+    [87,"Fr","Francium",1,7,"alk"],[88,"Ra","Radium",2,7,"ae"],[104,"Rf","Rutherfordium",4,7,"tm"],[105,"Db","Dubnium",5,7,"tm"],[106,"Sg","Seaborgium",6,7,"tm"],[107,"Bh","Bohrium",7,7,"tm"],[108,"Hs","Hassium",8,7,"tm"],[109,"Mt","Meitnerium",9,7,"tm"],[110,"Ds","Darmstadtium",10,7,"tm"],[111,"Rg","Roentgenium",11,7,"tm"],[112,"Cn","Copernicium",12,7,"tm"],[113,"Nh","Nihonium",13,7,"pm"],[114,"Fl","Flérovium",14,7,"pm"],[115,"Mc","Moscovium",15,7,"pm"],[116,"Lv","Livermorium",16,7,"pm"],[117,"Ts","Tennesse",17,7,"hal"],[118,"Og","Oganesson",18,7,"ng"],
+    [57,"La","Lanthane",4,9,"lan"],[58,"Ce","Cérium",5,9,"lan"],[59,"Pr","Praséodyme",6,9,"lan"],[60,"Nd","Néodyme",7,9,"lan"],[61,"Pm","Prométhium",8,9,"lan"],[62,"Sm","Samarium",9,9,"lan"],[63,"Eu","Europium",10,9,"lan"],[64,"Gd","Gadolinium",11,9,"lan"],[65,"Tb","Terbium",12,9,"lan"],[66,"Dy","Dysprosium",13,9,"lan"],[67,"Ho","Holmium",14,9,"lan"],[68,"Er","Erbium",15,9,"lan"],[69,"Tm","Thulium",16,9,"lan"],[70,"Yb","Ytterbium",17,9,"lan"],[71,"Lu","Lutécium",18,9,"lan"],
+    [89,"Ac","Actinium",4,10,"act"],[90,"Th","Thorium",5,10,"act"],[91,"Pa","Protactinium",6,10,"act"],[92,"U","Uranium",7,10,"act"],[93,"Np","Neptunium",8,10,"act"],[94,"Pu","Plutonium",9,10,"act"],[95,"Am","Américium",10,10,"act"],[96,"Cm","Curium",11,10,"act"],[97,"Bk","Berkélium",12,10,"act"],[98,"Cf","Californium",13,10,"act"],[99,"Es","Einsteinium",14,10,"act"],[100,"Fm","Fermium",15,10,"act"],[101,"Md","Mendélévium",16,10,"act"],[102,"No","Nobélium",17,10,"act"],[103,"Lr","Lawrencium",18,10,"act"]
+  ];
+  const FAM_NAMES = {
+    nm:"Non-métal", ng:"Gaz noble", alk:"Métal alcalin", ae:"Alcalino-terreux",
+    tm:"Métal de transition", pm:"Métal pauvre", mt:"Métalloïde",
+    hal:"Halogène", lan:"Lanthanide", act:"Actinide"
+  };
+
+  let overlay = null, searchEl = null, infoEl = null, cells = [];
+
+  function norm(s) {
+    return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  }
+
+  function selectSym(sym) {
+    const f = document.getElementById("cs-sketcher-iframe");
+    if (f && f.contentWindow) {
+      f.contentWindow.postMessage({ type: "cs_select_element", el: sym }, "*");
+    }
+    if (overlay) overlay.classList.remove("open");
+  }
+
+  function applyFilter(raw) {
+    const q = norm(raw);
+    let firstMatch = null, exactMatch = null;
+    cells.forEach(c => {
+      const ok = !q || c.dataset.search.includes(q);
+      c.classList.toggle("dim", !ok);
+      c.classList.remove("best-match");
+      if (ok && q) {
+        if (!firstMatch) firstMatch = c;
+        if (norm(c.dataset.sym) === q || c.dataset.z === q) exactMatch = c;
+      }
+    });
+    const pick = exactMatch || firstMatch;
+    if (pick && q) {
+      pick.classList.add("best-match");
+      infoEl.textContent = `Entrée ↵ pour choisir : Z = ${pick.dataset.z} · ${pick.dataset.sym} — ${pick.dataset.name} (${FAM_NAMES[pick.dataset.fam] || ""})`;
+    } else if (q) {
+      infoEl.textContent = "Aucun élément trouvé pour cette recherche.";
+    } else {
+      infoEl.textContent = "Survolez un élément pour ses détails · Cliquez ou tapez son symbole puis Entrée";
+    }
+    return pick;
+  }
+
+  function ensureModal() {
+    if (overlay) return;
+    const st = document.createElement("style");
+    st.textContent = `
+      #cs-pt-overlay {
+        position: fixed; inset: 0; z-index: 9999; display: none;
+        align-items: center; justify-content: center; padding: 18px;
+        background: rgba(4, 10, 14, 0.76); backdrop-filter: blur(10px);
+        font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
+      }
+      #cs-pt-overlay.open { display: flex; }
+      #cs-pt-card {
+        width: 100%; max-width: 1180px; max-height: 92vh; overflow: auto;
+        border-radius: 18px; padding: 18px 20px;
+        background: rgba(11, 20, 25, 0.96); color: #e6edf3;
+        border: 1px solid rgba(148, 163, 184, 0.26);
+        box-shadow: 0 28px 70px rgba(0, 0, 0, 0.58);
+        display: flex; flex-direction: column; gap: 12px;
+      }
+      body.body--light #cs-pt-card {
+        background: rgba(255, 255, 255, 0.98); color: #0f172a;
+        border-color: rgba(15, 23, 42, 0.14);
+      }
+      .cs-pt-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .cs-pt-title { font-family: 'JetBrains Mono', monospace; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: #38bdf8; font-weight: 700; }
+      body.body--light .cs-pt-title { color: #0284c7; }
+      .cs-pt-search-row { display: flex; align-items: center; gap: 8px; }
+      #cs-pt-search {
+        flex: 1; height: 40px; padding: 0 14px; border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.30);
+        background: rgba(255, 255, 255, 0.05); color: inherit;
+        font-size: 14px; font-family: inherit; outline: none;
+      }
+      body.body--light #cs-pt-search { background: #f8fafc; border-color: rgba(15, 23, 42, 0.18); }
+      #cs-pt-search:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18); }
+      .cs-pt-close {
+        height: 36px; padding: 0 12px; border-radius: 9px; cursor: pointer;
+        border: 1px solid rgba(148, 163, 184, 0.28); background: transparent;
+        color: inherit; font-weight: 700; font-size: 13px;
+      }
+      .cs-pt-close:hover { border-color: #f43f5e; color: #f43f5e; }
+      .cs-pt-grid {
+        display: grid; grid-template-columns: repeat(18, minmax(48px, 1fr));
+        grid-template-rows: repeat(7, 50px) 10px repeat(2, 50px);
+        gap: 4px; min-width: 920px;
+      }
+      .cs-pt-cell {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.24);
+        background: rgba(255, 255, 255, 0.04); color: inherit; cursor: pointer;
+        padding: 2px; transition: transform 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+        overflow: hidden;
+      }
+      .cs-pt-cell:hover { transform: scale(1.12); z-index: 5; border-color: #38bdf8; box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
+      .cs-pt-cell.dim { opacity: 0.16; }
+      .cs-pt-cell.cur-el { box-shadow: inset 0 0 0 2px #10b981; }
+      .cs-pt-cell.best-match { border-color: #38bdf8 !important; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.65); transform: scale(1.06); z-index: 4; }
+      .cs-pt-z { font-family: 'JetBrains Mono', monospace; font-size: 9px; opacity: 0.72; line-height: 1; }
+      .cs-pt-sym { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 700; line-height: 1.15; }
+      .cs-pt-nm { font-size: 8.5px; opacity: 0.78; line-height: 1.05; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cs-pt-gap {
+        display: flex; align-items: center; justify-content: center;
+        font-family: 'JetBrains Mono', monospace; font-size: 9.5px; opacity: 0.55;
+        border-radius: 7px; border: 1px dashed rgba(148, 163, 184, 0.28);
+      }
+      .cs-fam-nm  { background: rgba(16, 185, 129, 0.18); border-color: rgba(16, 185, 129, 0.45); }
+      .cs-fam-ng  { background: rgba(139, 92, 246, 0.18); border-color: rgba(139, 92, 246, 0.42); }
+      .cs-fam-alk { background: rgba(244, 63, 94, 0.16); border-color: rgba(244, 63, 94, 0.40); }
+      .cs-fam-ae  { background: rgba(249, 115, 22, 0.16); border-color: rgba(249, 115, 22, 0.40); }
+      .cs-fam-tm  { background: rgba(56, 189, 248, 0.13); border-color: rgba(56, 189, 248, 0.34); }
+      .cs-fam-pm  { background: rgba(148, 163, 184, 0.16); border-color: rgba(148, 163, 184, 0.36); }
+      .cs-fam-mt  { background: rgba(20, 184, 166, 0.18); border-color: rgba(20, 184, 166, 0.45); }
+      .cs-fam-hal { background: rgba(234, 179, 8, 0.18); border-color: rgba(234, 179, 8, 0.45); }
+      .cs-fam-lan { background: rgba(236, 72, 153, 0.15); border-color: rgba(236, 72, 153, 0.38); }
+      .cs-fam-act { background: rgba(217, 70, 239, 0.15); border-color: rgba(217, 70, 239, 0.38); }
+      .cs-pt-foot { font-family: 'JetBrains Mono', monospace; font-size: 12px; opacity: 0.82; min-height: 18px; }
+    `;
+    document.head.appendChild(st);
+
+    overlay = document.createElement("div");
+    overlay.id = "cs-pt-overlay";
+    overlay.innerHTML = `
+      <div id="cs-pt-card">
+        <div class="cs-pt-top">
+          <span class="cs-pt-title">Tableau Périodique des Éléments (118)</span>
+          <button class="cs-pt-close" id="cs-pt-close">Fermer (Échap)</button>
+        </div>
+        <div class="cs-pt-search-row">
+          <input id="cs-pt-search" type="text" placeholder="Rechercher un élément par symbole, nom ou numéro atomique (ex : Pd, Bore, 26, Cuivre)..."/>
+          <button class="cs-pt-close" id="cs-pt-clear-q" title="Effacer la recherche">✕</button>
+        </div>
+        <div style="overflow-x:auto;padding:4px 2px;">
+          <div class="cs-pt-grid" id="cs-pt-grid"></div>
+        </div>
+        <div class="cs-pt-foot" id="cs-pt-info">Survolez un élément pour ses détails · Cliquez ou tapez son symbole puis Entrée</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const grid = overlay.querySelector("#cs-pt-grid");
+    searchEl = overlay.querySelector("#cs-pt-search");
+    infoEl = overlay.querySelector("#cs-pt-info");
+
+    const addGap = (txt, col, row) => {
+      const g = document.createElement("div");
+      g.className = "cs-pt-gap";
+      g.style.gridColumn = String(col);
+      g.style.gridRow = String(row);
+      g.textContent = txt;
+      grid.appendChild(g);
+    };
+    addGap("57–71", 3, 6);
+    addGap("89–103", 3, 7);
+
+    PT_DATA.forEach(([z, sym, name, col, row, fam]) => {
+      const btn = document.createElement("button");
+      btn.className = "cs-pt-cell cs-fam-" + fam;
+      btn.style.gridColumn = String(col);
+      btn.style.gridRow = String(row);
+      btn.dataset.z = String(z);
+      btn.dataset.sym = sym;
+      btn.dataset.name = name;
+      btn.dataset.fam = fam;
+      btn.dataset.search = norm(`${z} ${sym} ${name} ${FAM_NAMES[fam] || ""}`);
+      btn.innerHTML = `<span class="cs-pt-z">${z}</span><span class="cs-pt-sym">${sym}</span><span class="cs-pt-nm">${name}</span>`;
+      btn.addEventListener("mouseenter", () => {
+        infoEl.textContent = `Z = ${z} · ${sym} — ${name} · ${FAM_NAMES[fam] || ""}`;
+      });
+      btn.addEventListener("click", () => selectSym(sym));
+      grid.appendChild(btn);
+      cells.push(btn);
+    });
+
+    searchEl.addEventListener("input", () => applyFilter(searchEl.value));
+    searchEl.addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        const pick = applyFilter(searchEl.value);
+        if (pick) selectSym(pick.dataset.sym);
+      } else if (e.key === "Escape") {
+        overlay.classList.remove("open");
+      }
+    });
+    overlay.querySelector("#cs-pt-clear-q").addEventListener("click", () => {
+      searchEl.value = "";
+      applyFilter("");
+      searchEl.focus();
+    });
+    overlay.querySelector("#cs-pt-close").addEventListener("click", () => overlay.classList.remove("open"));
+    overlay.addEventListener("pointerdown", e => {
+      if (e.target === overlay) overlay.classList.remove("open");
+    });
+    window.addEventListener("keydown", e => {
+      if (e.key === "Escape" && overlay && overlay.classList.contains("open")) {
+        overlay.classList.remove("open");
+      }
+    });
+  }
+
+  return function(activeEl) {
+    ensureModal();
+    searchEl.value = "";
+    applyFilter("");
+    cells.forEach(c => c.classList.toggle("cur-el", c.dataset.sym === activeEl));
+    overlay.classList.add("open");
+    setTimeout(() => searchEl.focus(), 40);
+  };
+})();
+
+// Pont temps réel du dessinateur 2D maison -> NiceGUI + presse-papiers + tableau périodique
 window.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "cs_sketcher_change" && typeof emitEvent === "function") {
-    emitEvent("cs_sketcher_change", { graph: event.data.graph || {} });
+  if (!event.data || typeof event.data !== "object") return;
+  const d = event.data;
+  if (d.type === "cs_sketcher_change" && typeof emitEvent === "function") {
+    emitEvent("cs_sketcher_change", { graph: d.graph || {} });
+  } else if (d.type === "cs_copy_text" && typeof window.cbCopyText === "function") {
+    window.cbCopyText(String(d.text || ""), String(d.label || "Texte"));
+  } else if (d.type === "cs_copy_png" && d.svg) {
+    window.csCopySvgAsPng(String(d.svg));
+  } else if (d.type === "cs_download_svg" && d.svg) {
+    window.csDownloadSvg(String(d.svg));
+  } else if (d.type === "cs_toast" && d.text) {
+    window.csToast(String(d.text));
+  } else if (d.type === "cs_open_periodic_table") {
+    window.csOpenPeriodicTable(String(d.activeEl || "C"));
   }
 });
 </script>

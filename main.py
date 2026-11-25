@@ -99,12 +99,12 @@ def serve_custom_sketcher(smiles: str = "", dark: int = 1):
 async def api_clean_2d(request: Request):
     try:
         graph = await request.json()
-        cleaned, smi, msg = clean_graph_2d(graph if isinstance(graph, dict) else {})
+        cleaned, smi, msg, bad_ids = clean_graph_2d(graph if isinstance(graph, dict) else {})
         if cleaned is None:
-            return JSONResponse(content={"ok": False, "message": msg})
-        return JSONResponse(content={"ok": True, "graph": cleaned, "smiles": smi, "message": msg})
+            return JSONResponse(content={"ok": False, "message": msg, "invalid_ids": bad_ids})
+        return JSONResponse(content={"ok": True, "graph": cleaned, "smiles": smi, "message": msg, "invalid_ids": []})
     except Exception as ex:
-        return JSONResponse(content={"ok": False, "message": f"Erreur : {ex}"})
+        return JSONResponse(content={"ok": False, "message": f"Erreur : {ex}", "invalid_ids": []})
 
 
 @app.get("/api/studio/3d/standard", response_class=HTMLResponse)
@@ -492,13 +492,17 @@ def index_page(smiles: str = "", cas: str = ""):
             graph = (e.args or {}).get("graph", {}) if isinstance(e.args, dict) else {}
             if not isinstance(graph, dict):
                 return
-            smi, msg = graph_to_smiles(graph)
+            smi, msg, bad_ids = graph_to_smiles(graph)
             if not smi:
                 state["last_sketcher_smi"] = ""
-                ui.run_javascript(f"window.csPushSketcherStatus(false, {json.dumps(msg)});")
+                ui.run_javascript(
+                    f"window.csPushSketcherStatus(false, {json.dumps(msg)}, {json.dumps(bad_ids)}, '');"
+                )
                 return
 
-            ui.run_javascript('window.csPushSketcherStatus(true, "Valence OK");')
+            ui.run_javascript(
+                f'window.csPushSketcherStatus(true, "Valence OK", [], {json.dumps(smi)});'
+            )
             cur_single = extract_single_smiles(state["current_smiles"])
             if smi == cur_single:
                 state["last_sketcher_smi"] = smi
