@@ -1,5 +1,6 @@
 from collections import Counter
 from functools import lru_cache
+from itertools import permutations
 import html
 import json
 import os
@@ -33,13 +34,7 @@ EXEMPLES_MOLECULES: dict[str, str] = {
     "Biphényle-4-carboxamide (Suzuki)": "NC(=O)c1ccc(-c2ccccc2)cc1",
 }
 
-REACTION_TEMPLATES: dict[str, str] = {
-    "Estérification de Fischer (Acide + Alcool → Ester)": "[C:1](=[O:2])[OH].[O:3][C:4]>>[C:1](=[O:2])[O:3][C:4]",
-    "Formation d'Amide (Acide + Amine → Amide)": "[C:1](=[O:2])[OH].[N;H2,H1:3]>>[C:1](=[O:2])[N:3]",
-    "Couplage de Suzuki-Miyaura (Ar-Br/Cl + Ar-B(OH)2)": "[c:1][Br,Cl,I].[c:2][B](O)O>>[c:1]-[c:2]",
-    "Réduction de Carbonyle en Alcool": "[C:1]=[O:2]>>[C:1][OH:2]",
-    "Click Chemistry CuAAC (Alcyne + Azoture → Triazole)": "[C:1]#[CH:2].[N:3]=[N+:4]=[N-:5]>>[c:1]1[cH:2][n:3][n:4][n:5]1",
-}
+from reactions_db import REACTION_CATALOG, REACTION_TEMPLATES, RETRO_RULES
 
 
 def clean_val(v: Any) -> str:
@@ -781,24 +776,102 @@ def predict_reaction_product(reactant_smiles_list: list[str], template_smarts: s
         return None, f"Erreur de prédiction : {ex}"
 
 
+def predict_reaction_candidates(
+    reactant_smiles_list: list[str],
+    template_name: str = "__auto__",
+) -> list[dict[str, Any]]:
+    """Teste le catalogue de réactions et renvoie les produits candidats dédupliqués."""
+    r_mols = [m for s in reactant_smiles_list if (m := parse_smiles(s)) is not None]
+    if not r_mols:
+        return []
+
+    input_cans = {Chem.MolToSmiles(m, canonical=True) for m in r_mols}
+
+    def _run_one_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        seen_local: set[str] = set()
+        try:
+            rxn_eng = rdChemReactions.ReactionFromSmarts(item["smarts"])
+            needed = rxn_eng.GetNumReactantTemplates()
+        except Exception:
+            return found
+
+        if len(r_mols) < needed:
+            return found
+
+        if needed == 1:
+            tuples_to_try = [(m,) for m in r_mols]
+        elif needed == 2:
+            tuples_to_try = list(permutations(r_mols[:5], 2))
+        else:
+            tuples_to_try = [tuple(r_mols[:needed])]
+
+        for r_tup in tuples_to_try:
+            try:
+                prod_sets = rxn_eng.RunReactants(r_tup)
+            except Exception:
+                continue
+            for p_set in prod_sets:
+                if not p_set:
+                    continue
+                pm = Chem.Mol(p_set[0])
+                try:
+                    Chem.SanitizeMol(pm)
+                    can = Chem.MolToSmiles(pm, canonical=True)
+                except Exception:
+                    continue
+                if not can or can in seen_local or can in input_cans:
+                    continue
+                seen_local.add(can)
+                found.append({
+                    "smiles": can,
+                    "name": item["name"],
+                    "category": item["category"],
+                    "reagents": item.get("reagents", ""),
+                    "n_reactants": needed,
+                })
+                # Limite à 2 régioisomères distincts max par modèle (évite de noyer l'écran)
+                if len(found) >= 2:
+                    return found
+        return found
+
+    # Mode modèle précis choisi dans le catalogue
+    if template_name != "__auto__":
+        target = next((it for it in REACTION_CATALOG if it["name"] == template_name), None)
+        return _run_one_item(target) if target else []
+
+    # Mode automatique : priorité aux réactions utilisant 2 réactifs s'il y en a >= 2
+    candidates: list[dict[str, Any]] = []
+    if len(r_mols) >= 2:
+        for item in REACTION_CATALOG:
+            if int(item.get("n_reactants", 1)) == 2:
+                candidates.extend(_run_one_item(item))
+
+    # Si 1 seul réactif (ou aucune réaction à 2 réactifs compatible), teste les réactions à 1 réactif
+    if not candidates:
+        for item in REACTION_CATALOG:
+            if int(item.get("n_reactants", 1)) == 1:
+                candidates.extend(_run_one_item(item))
+
+    # Déduplication globale sur (smiles, nom)
+    unique: list[dict[str, Any]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for c in candidates:
+        key = (c["smiles"], c["name"])
+        if key not in seen_pairs:
+            seen_pairs.add(key)
+            unique.append(c)
+    return unique
+
+
 def run_retrosynthesis_engine(mol) -> list[dict[str, Any]]:
     if mol is None:
         return []
-    retro_rules = [
-        ("Coupure d'Ester (Estérification de Fischer / Schotten-Baumann)", "[C:1](=[O:2])-[O:3]-[C,c:4]>>[C:1](=[O:2])O.[O:3][C,c:4]"),
-        ("Coupure d'Amide (Couplage Peptidique / Chlorure d'acyle)", "[C:1](=[O:2])-[N;H1,H0:3]-[C,c:4]>>[C:1](=[O:2])O.[N:3][C,c:4]"),
-        ("Couplage Croisé de Suzuki-Miyaura (Liaison Biaryle Pd⁰)", "[c:1]-[c:2]>>[c:1]Br.[c:2]B(O)O"),
-        ("Synthèse d'Éther de Williamson (Substitution Nucléophile SN2)", "[CX4:1]-[OX2:2]-[CX4,c:3]>>[C:1]Br.[O:2][C,c:3]"),
-        ("Addition de Grignard sur Carbonyle (Coupure d'Alcool II/III)", "[C,c:1]-[CX4;H1,H0:2](-[OX2H1:3])-[C,c:4]>>[C,c:1][Mg]Br.[C:2](=[O:3])[C,c:4]"),
-        ("Amination Réductrice (Imine / Borohydrure)", "[C,c:1]-[CH2:2]-[NX3;H1,H2:3]>>[C,c:1][CH:2]=O.[N:3]"),
-        ("Cycloaddition Click CuAAC (Déconnexion de 1,2,3-Triazole)", "[c:1]1[cH:2][n:3][n:4][n:5]1>>[C:1]#[CH:2].[N:3]=[N+:4]=[N-:5]"),
-        ("Oléfination de Wittig (Coupure d'Alcène C=C)", "[C,c:1]-[CH:2]=[CH:3]-[C,c:4]>>[C,c:1][CH:2]=O.[C,c:4][CH2:3]Br"),
-    ]
     routes: list[dict[str, Any]] = []
     seen: set[str] = set()
     target_can = Chem.MolToSmiles(mol, canonical=True)
 
-    for name, smarts in retro_rules:
+    for name, smarts in RETRO_RULES:
         try:
             rxn = rdChemReactions.ReactionFromSmarts(smarts)
             if not rxn:
@@ -809,8 +882,13 @@ def run_retrosynthesis_engine(mol) -> list[dict[str, Any]]:
                 valid = True
                 for pm in p_tuple:
                     try:
-                        Chem.SanitizeMol(pm)
-                        precursors.append(Chem.MolToSmiles(pm, canonical=True))
+                        pm_copy = Chem.Mol(pm)
+                        Chem.SanitizeMol(pm_copy)
+                        p_can = Chem.MolToSmiles(pm_copy, canonical=True)
+                        if not p_can or p_can == target_can:
+                            valid = False
+                        else:
+                            precursors.append(p_can)
                     except Exception:
                         valid = False
                 if valid and len(precursors) >= 2:
