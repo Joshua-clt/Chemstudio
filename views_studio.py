@@ -801,7 +801,7 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                     if not (cb_url and cb_key):
                         safe_html(
                             '<div class="muted-small" style="padding:6px 0;">'
-                            'ChemBase non connecté (variables <code>CHEMBASE_URL</code> / <code>CHEMBASE_API_KEY</code> non configurées).'
+                            'Optionnel : cliquez sur « ChemBase » en haut à droite pour relier votre espace laboratoire.'
                             '</div>'
                         )
                     else:
@@ -833,11 +833,11 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                                         safe_html('<span class="muted-small">Aucune fiche trouvée dans ChemBase.</span>')
                                         return
                                     for it in items[:20]:
-                                        it_name = clean_val(it.get("nom") or it.get("name") or it.get("title") or "Sans nom")
+                                        it_name = clean_val(it.get("produit") or it.get("Produit final") or it.get("nom") or it.get("name") or it.get("title") or "Sans nom")
                                         it_cas = clean_val(it.get("cas") or it.get("CAS") or "")
                                         it_smi = clean_val(it.get("smiles") or it.get("SMILES") or "")
-                                        it_form = clean_val(it.get("formule") or it.get("formula") or "")
-                                        sub_bits = [b for b in (f"CAS {it_cas}" if it_cas else "", it_form) if b]
+                                        it_extra = clean_val(it.get("formule") or it.get("formula") or it.get("reaction_1") or "")
+                                        sub_bits = [b for b in (f"CAS {it_cas}" if it_cas and it_cas not in ("N/A", "-") else "", it_extra) if b]
 
                                         with ui.element("div").classes("kv-item").style(
                                             "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;"
@@ -853,8 +853,10 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                                             async def _pick_cb(_e=None, s=it_smi, nm=it_name, cs=it_cas):
                                                 resolved = s
                                                 if not resolved or parse_smiles(resolved) is None:
-                                                    q_fb = cs or nm
-                                                    resolved = await run.io_bound(resolve_query_to_smiles, q_fb) or ""
+                                                    q_try = cs if cs and cs not in ("N/A", "-") else nm
+                                                    resolved = await run.io_bound(resolve_query_to_smiles, q_try) or ""
+                                                    if not resolved and nm and nm != q_try:
+                                                        resolved = await run.io_bound(resolve_query_to_smiles, nm) or ""
                                                 if not resolved:
                                                     ui.notify(f"Impossible de résoudre la structure pour {nm}.", type="warning")
                                                     return
@@ -1676,7 +1678,7 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                         ui.timer(0.05, enrich_basket_names, once=True)
 
                 # ======================================================
-                # SOUS-ONGLET 2 : RÉTROSENTHÈSE IA
+                # SOUS-ONGLET 2 : RÉTROSENTHÈSE
                 # ======================================================
                 elif rxn_cfg["sub"] == "retro":
                     if not mol_main:

@@ -842,13 +842,13 @@ window.csOpenPeriodicTable = (function() {
         box-shadow: 0 28px 70px rgba(0, 0, 0, 0.58);
         display: flex; flex-direction: column; gap: 12px;
       }
-      body.body--light #cs-pt-card {
+      html[data-theme="light"] #cs-pt-card {
         background: rgba(255, 255, 255, 0.98); color: #0f172a;
         border-color: rgba(15, 23, 42, 0.14);
       }
       .cs-pt-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
       .cs-pt-title { font-family: 'JetBrains Mono', monospace; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: #38bdf8; font-weight: 700; }
-      body.body--light .cs-pt-title { color: #0284c7; }
+      html[data-theme="light"] .cs-pt-title { color: #0284c7; }
       .cs-pt-search-row { display: flex; align-items: center; gap: 8px; }
       #cs-pt-search {
         flex: 1; height: 40px; padding: 0 14px; border-radius: 10px;
@@ -856,7 +856,7 @@ window.csOpenPeriodicTable = (function() {
         background: rgba(255, 255, 255, 0.05); color: inherit;
         font-size: 14px; font-family: inherit; outline: none;
       }
-      body.body--light #cs-pt-search { background: #f8fafc; border-color: rgba(15, 23, 42, 0.18); }
+      html[data-theme="light"] #cs-pt-search { background: #f8fafc; border-color: rgba(15, 23, 42, 0.18); }
       #cs-pt-search:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18); }
       .cs-pt-close {
         height: 36px; padding: 0 12px; border-radius: 9px; cursor: pointer;

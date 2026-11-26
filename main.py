@@ -2,6 +2,7 @@ import base64
 import html
 import json
 import os
+import secrets
 import threading
 import time
 from typing import Any
@@ -24,8 +25,9 @@ from chem_engine import (
     extract_single_smiles,
     fetch_chembase_catalog,
     generate_3d_mol,
-    get_chemical_identifiers,
     get_chembase_config,
+    get_chemical_identifiers,
+    is_safe_public_url,
     lookup_chembase_by_cas,
     overlay_molecules_3d,
     parse_smiles,
@@ -38,7 +40,9 @@ from views_spec_export import build_spec_and_export_views
 from views_studio import build_studio_views
 
 IS_RENDER = os.environ.get("RENDER") is not None
-STORAGE_SECRET = os.environ.get("STORAGE_SECRET", "chemstudio-ultra-2026")
+STORAGE_SECRET = os.environ.get("STORAGE_SECRET") or (
+    secrets.token_urlsafe(32) if IS_RENDER else "chemstudio-local-dev"
+)
 _LAST_WAKE_PING = 0.0
 
 DEFAULT_FAVICON_SVG = (
@@ -66,7 +70,7 @@ def _wake_chembase_async(base_url: str):
     """Réveille silencieusement ChemBase sur Render (au plus une fois toutes les 5 min)."""
     global _LAST_WAKE_PING
     url_clean = clean_val(base_url).rstrip("/")
-    if not url_clean:
+    if not url_clean or not is_safe_public_url(url_clean):
         return
     now = time.time()
     if now - _LAST_WAKE_PING < 300:
@@ -123,7 +127,7 @@ def serve_3d_standard(
 ):
     mol_3d = generate_3d_mol(clean_val(smiles), force_field=ff, seed=seed)
     if not mol_3d:
-        return HTMLResponse(content="<html><body style='color:#94a3b8;font-family:sans-serif;padding:20px;'>Structure 3D indisponible.</body></html>")
+        return HTMLResponse(content="<html><body style='color:#94a3b8;font-family:sans-serif;padding:20px;'>Structure 3D indisponible (ou molécule supérieure à 120 atomes lourds).</body></html>")
     if ai >= 0 and aj >= 0 and dist > 0 and ai != aj:
         set_bond_length_3d(mol_3d, ai, aj, dist)
     return HTMLResponse(
@@ -146,7 +150,7 @@ def serve_3d_quantum(smiles: str = "", mode: str = "HOMO", dark: int = 1):
         return HTMLResponse(content="<html><body style='color:#94a3b8;font-family:sans-serif;padding:20px;'>Calcul quantique indisponible.</body></html>")
     q_res = compute_quantum_orbitals(mol_main)
     if not q_res:
-        return HTMLResponse(content="<html><body style='color:#94a3b8;font-family:sans-serif;padding:20px;'>Calcul quantique indisponible.</body></html>")
+        return HTMLResponse(content="<html><body style='color:#94a3b8;font-family:sans-serif;padding:20px;'>Calcul quantique indisponible (ou molécule supérieure à 100 atomes lourds).</body></html>")
     coeffs = q_res["c_homo"] if mode == "HOMO" else q_res["c_lumo"]
     return HTMLResponse(content=build_3dmol_quantum_html(mol_3d, coeffs, mode=mode, dark_mode=bool(dark)))
 
@@ -179,8 +183,9 @@ def _btn(label_html: str, classes: str = "glass-btn", on_click=None, style: str 
 def index_page(smiles: str = "", cas: str = ""):
     inject_theme()
 
-    saved_dark = bool(app.storage.user.get("dark", True))
+    saved_dark = True
     dark = ui.dark_mode(value=saved_dark)
+    default_cb_url, default_cb_key = get_chembase_config()
 
     initial_smi = clean_val(smiles) or "CC(=O)OC1=CC=CC=C1C(=O)O"
     if parse_smiles(initial_smi) is None:
@@ -203,22 +208,23 @@ def index_page(smiles: str = "", cas: str = ""):
         "chembase_match": None,
         "ident_seq": 0,
         "pubchem_timer": None,
+        "chembase_url": default_cb_url,
+        "chembase_api_key": default_cb_key,
     }
     if initial_smi not in state["history"]:
         state["history"].insert(0, initial_smi)
 
     def get_cb_creds() -> tuple[str, str]:
-        env_url, env_key = get_chembase_config()
-        u = env_url or clean_val(app.storage.user.get("chembase_url", ""))
-        k = env_key or clean_val(app.storage.user.get("chembase_api_key", ""))
-        return u.rstrip("/"), k
+        u = clean_val(state.get("chembase_url", "")).rstrip("/")
+        k = clean_val(state.get("chembase_api_key", ""))
+        return u, k
 
     def sync_rxn_smiles():
         r_part = ".".join(state["rxn_reactants"]) if state["rxn_reactants"] else "CC(=O)O"
         p_part = ".".join(state["rxn_products"]) if state["rxn_products"] else "CC(=O)OCC"
         state["rxn_smiles"] = f"{r_part}>>{p_part}"
 
-    # Réveil croisé silencieux de ChemBase sur Render
+    # Réveil croisé silencieux de ChemBase sur Render (uniquement si configuré)
     cb_url_boot, _cb_key_boot = get_cb_creds()
     if cb_url_boot:
         _wake_chembase_async(cb_url_boot)
@@ -234,10 +240,6 @@ def index_page(smiles: str = "", cas: str = ""):
     examples_dialog = ui.dialog().props('transition-show="fade" transition-hide="fade"')
     with examples_dialog:
         examples_body = ui.element("div").classes("cb-modal-card")
-
-    basket_dialog = ui.dialog().props('transition-show="fade" transition-hide="fade"')
-    with basket_dialog:
-        basket_body = ui.element("div").classes("cb-modal-card")
 
     iupac_dialog = ui.dialog().props('transition-show="fade" transition-hide="fade"')
     with iupac_dialog:
@@ -283,8 +285,8 @@ def index_page(smiles: str = "", cas: str = ""):
 
                 def toggle_theme(_e=None):
                     state["dark"] = not state["dark"]
-                    app.storage.user["dark"] = state["dark"]
                     mode = "dark" if state["dark"] else "light"
+                    ui.run_javascript(f'localStorage.setItem("cs_theme", "{mode}");')
                     ui.run_javascript(f'window.cbToggleThemeWave("{mode}");')
 
                     def after_wave():
@@ -329,15 +331,15 @@ def index_page(smiles: str = "", cas: str = ""):
             with basket_btn_slot:
                 r_n = len(state["rxn_reactants"])
                 p_n = len(state["rxn_products"])
-                _btn(f"Panier ({r_n}R → {p_n}P)", on_click=lambda _e: open_basket_modal())
+                _btn(f"Réaction ({r_n}R → {p_n}P)", on_click=lambda _e: switch_tab("trxn"))
 
             cb_url, cb_key = get_cb_creds()
             cb_connected = bool(cb_url and cb_key)
-            dot_cls = "status-ok" if cb_connected else "status-warn"
             cb_btn_slot.clear()
             with cb_btn_slot:
+                dot_html = '<span class="status-dot status-ok"></span>' if cb_connected else ""
                 _btn(
-                    f'<span class="status-dot {dot_cls}"></span><span>ChemBase</span>',
+                    f'{dot_html}<span>ChemBase</span>',
                     on_click=lambda _e: open_chembase_modal(),
                 )
 
@@ -347,7 +349,8 @@ def index_page(smiles: str = "", cas: str = ""):
             mol_main = parse_smiles(single_smi)
             ident = state["ident"]
             cb_match = state["chembase_match"]
-            cb_url, _cb_key = get_cb_creds()
+            cb_url, cb_key = get_cb_creds()
+            cb_connected = bool(cb_url and cb_key)
 
             with banner_slot:
                 if not mol_main:
@@ -361,9 +364,9 @@ def index_page(smiles: str = "", cas: str = ""):
 
                 cb_badge_html = ""
                 if cb_match:
-                    cb_prod = clean_val(cb_match.get("Produit final")) or triv_val
+                    cb_prod = clean_val(cb_match.get("Produit final") or cb_match.get("produit")) or triv_val
                     cb_badge_html = f'<span class="stock-pill stock-ok" title="Présent dans votre catalogue ChemBase">En base ChemBase · {html.escape(cb_prod)}</span>'
-                elif cb_url and cas_val not in ("...", "Non trouvé"):
+                elif cb_connected and cas_val not in ("...", "Non trouvé"):
                     cb_badge_html = '<span class="stock-pill stock-low">Absent de ChemBase</span>'
 
                 with ui.element("div").classes("mol-banner"):
@@ -395,21 +398,18 @@ def index_page(smiles: str = "", cas: str = ""):
                                 tab_refreshers["trxn"]()
                             ui.notify(f"« {triv_val} » défini comme produit cible.", type="positive")
 
-                        _btn("➕ Réactif", style="padding:5px 10px;font-size:0.76rem;", on_click=quick_add_r)
-                        _btn("🎯 Produit", style="padding:5px 10px;font-size:0.76rem;", on_click=quick_set_p)
+                        _btn("+ Réactif", style="padding:5px 10px;font-size:0.76rem;", on_click=quick_add_r)
+                        _btn("Définir Produit", style="padding:5px 10px;font-size:0.76rem;", on_click=quick_set_p)
 
-                        send_url = build_chembase_send_url(cas_val, triv_val, cprop["canonical_smiles"], override_url=cb_url)
+                        send_url = (
+                            build_chembase_send_url(cas_val, triv_val, cprop["canonical_smiles"], override_url=cb_url)
+                            if cb_connected
+                            else ""
+                        )
                         if send_url:
                             safe_html(
                                 f'<a class="glass-btn glass-btn-accent" style="padding:5px 11px;font-size:0.76rem;" '
-                                f'href="{html.escape(send_url)}" target="_blank">Envoyer vers ChemBase ↗</a>'
-                            )
-                        else:
-                            _btn(
-                                "Relier ChemBase",
-                                classes="glass-btn glass-btn-accent",
-                                style="padding:5px 11px;font-size:0.76rem;",
-                                on_click=lambda _e: open_chembase_modal(),
+                                f'href="{html.escape(send_url)}" target="_blank" rel="noopener noreferrer">Envoyer vers ChemBase ↗</a>'
                             )
 
         async def resolve_banner_async(target_smi: str, seq_id: int):
@@ -441,7 +441,7 @@ def index_page(smiles: str = "", cas: str = ""):
                 sync_rxn_smiles()
                 refresh_header_badges()
                 single = r_list[0] if r_list else extract_single_smiles(raw)
-                ui.notify("Réaction détectée et chargée dans le panier réactionnel.", type="info")
+                ui.notify("Réaction détectée et chargée dans l'onglet Réactions.", type="info")
             else:
                 m = parse_smiles(raw)
                 if m is None:
@@ -581,50 +581,6 @@ def index_page(smiles: str = "", cas: str = ""):
                         )
             examples_dialog.open()
 
-        def open_basket_modal():
-            basket_body.clear()
-            single_smi = extract_single_smiles(state["current_smiles"])
-            with basket_body:
-                with ui.element("div").classes("modal-head"):
-                    with ui.element("div"):
-                        safe_html('<div class="section-kicker">PANIER RÉACTIONNEL</div><h2 style="margin:4px 0 0 0;">Réactifs &amp; Produits Actifs</h2>')
-                    _btn("Fermer ✕", on_click=lambda _e: basket_dialog.close())
-
-                safe_html(
-                    f'<div class="kv-grid" style="margin-bottom:14px;">'
-                    f'<div class="kv-item"><div class="kv-label">Réactifs ({len(state["rxn_reactants"])})</div>'
-                    f'<div class="kv-val" style="font-family:\'JetBrains Mono\',monospace;font-size:0.78rem;">{html.escape(" + ".join(state["rxn_reactants"]) or "Aucun")}</div></div>'
-                    f'<div class="kv-item"><div class="kv-label">Produits ({len(state["rxn_products"])})</div>'
-                    f'<div class="kv-val" style="font-family:\'JetBrains Mono\',monospace;font-size:0.78rem;">{html.escape(" + ".join(state["rxn_products"]) or "Aucun")}</div></div>'
-                    f'</div>'
-                )
-
-                def act_add(kind: str):
-                    m = parse_smiles(single_smi)
-                    if not m and kind != "clear":
-                        return
-                    can = Chem.MolToSmiles(m, canonical=True) if m else ""
-                    if kind == "r":
-                        state["rxn_reactants"].append(can)
-                    elif kind == "p_set":
-                        state["rxn_products"] = [can]
-                    elif kind == "p_add":
-                        state["rxn_products"].append(can)
-                    elif kind == "clear":
-                        state["rxn_reactants"] = []
-                    sync_rxn_smiles()
-                    refresh_header_badges()
-                    if state["tab"] == "trxn" and callable(tab_refreshers.get("trxn")):
-                        tab_refreshers["trxn"]()
-                    open_basket_modal()
-
-                with ui.element("div").style("display:flex;gap:8px;flex-wrap:wrap;"):
-                    _btn("➕ Ajouter comme Réactif", classes="glass-btn glass-btn-accent", on_click=lambda _e: act_add("r"))
-                    _btn("🎯 Définir comme Produit", on_click=lambda _e: act_add("p_set"))
-                    _btn("➕ Ajouter comme Co-Produit", on_click=lambda _e: act_add("p_add"))
-                    _btn("Vider les réactifs", classes="glass-btn glass-btn-danger", on_click=lambda _e: act_add("clear"))
-            basket_dialog.open()
-
         def open_iupac_modal(cprop: dict[str, Any]):
             iupac_body.clear()
             iupac_name = clean_val(state["ident"].get("iupac")) or "Non répertorié"
@@ -652,45 +608,69 @@ def index_page(smiles: str = "", cas: str = ""):
 
         def open_chembase_modal():
             chembase_body.clear()
-            env_url, env_key = get_chembase_config()
             cur_url, cur_key = get_cb_creds()
 
             with chembase_body:
                 with ui.element("div").classes("modal-head"):
                     with ui.element("div"):
-                        safe_html('<div class="section-kicker">PONT BIDIRECTIONNEL · API REST (X-API-Key)</div><h2 style="margin:4px 0 0 0;">Connexion &amp; Import ChemBase v2.0</h2>')
+                        safe_html('<div class="section-kicker">INTÉGRATION OPTIONNELLE</div><h2 style="margin:4px 0 0 0;">Liaison avec ChemBase</h2>')
                     _btn("Fermer ✕", on_click=lambda _e: chembase_dialog.close())
 
-                if env_url and env_key:
-                    safe_html(
-                        f'<div class="kv-item" style="margin-bottom:12px;">'
-                        f'<span class="stock-pill stock-ok">Configuré via variables Render</span> '
-                        f'<span class="muted-small" style="margin-left:8px;">{html.escape(env_url)}</span></div>'
-                    )
-                else:
-                    with ui.element("div").style("display:grid;grid-template-columns:1.2fr 1.2fr auto;gap:8px;align-items:center;margin-bottom:12px;"):
-                        in_cb_url = ui.input(
-                            label="URL ChemBase (ex: https://chembase.onrender.com)",
-                            value=cur_url,
-                        ).props("outlined dense")
-                        in_cb_key = ui.input(
-                            label="Clé X-API-Key ChemBase",
-                            value=cur_key,
-                            password=True,
-                            password_toggle_button=True,
-                        ).props("outlined dense")
+                safe_html(
+                    '<p class="muted-small" style="margin:0 0 10px 0;">'
+                    'Optionnel : reliez votre espace ChemBase pour importer vos fiches ou y envoyer vos molécules. '
+                    'Vos identifiants restent enregistrés uniquement dans ce navigateur.'
+                    '</p>'
+                )
 
-                        def save_cb_cfg(_e=None):
-                            new_u = clean_val(in_cb_url.value).rstrip("/")
-                            app.storage.user["chembase_url"] = new_u
-                            app.storage.user["chembase_api_key"] = clean_val(in_cb_key.value)
+                grid_cols = "1.2fr 1.2fr auto auto" if cur_key else "1.2fr 1.2fr auto"
+                with ui.element("div").style(f"display:grid;grid-template-columns:{grid_cols};gap:8px;align-items:center;margin-bottom:12px;"):
+                    in_cb_url = ui.input(
+                        label="Adresse ChemBase (https://...)",
+                        value=cur_url,
+                    ).props("outlined dense")
+                    in_cb_key = ui.input(
+                        label="Clé d'accès du laboratoire",
+                        value=cur_key,
+                        password=True,
+                        password_toggle_button=True,
+                    ).props("outlined dense")
+
+                    def save_cb_cfg(_e=None):
+                        new_u = clean_val(in_cb_url.value).rstrip("/")
+                        new_k = clean_val(in_cb_key.value)
+                        if new_u and not is_safe_public_url(new_u):
+                            ui.notify("Adresse invalide : utilisez une URL publique en https://", type="negative")
+                            return
+                        state["chembase_url"] = new_u
+                        state["chembase_api_key"] = new_k
+                        payload = json.dumps(json.dumps({"url": new_u, "key": new_k}))
+                        ui.run_javascript(f'localStorage.setItem("cs_chembase_cfg", {payload});')
+                        if new_u:
                             _wake_chembase_async(new_u)
-                            refresh_header_badges()
-                            render_molecule_banner()
-                            ui.notify("Paramètres ChemBase enregistrés pour cette session.", type="positive")
-                            ui.timer(0.05, load_cb_catalog, once=True)
+                        refresh_header_badges()
+                        render_molecule_banner()
+                        if state["tab"] == "trxn" and callable(tab_refreshers.get("trxn")):
+                            tab_refreshers["trxn"]()
+                        ui.notify("Connexion ChemBase enregistrée sur ce navigateur.", type="positive")
+                        ui.timer(0.05, load_cb_catalog, once=True)
 
-                        _btn("Enregistrer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=save_cb_cfg)
+                    def disconnect_cb(_e=None):
+                        default_u, _ = get_chembase_config()
+                        state["chembase_url"] = default_u
+                        state["chembase_api_key"] = ""
+                        state["chembase_match"] = None
+                        ui.run_javascript('localStorage.removeItem("cs_chembase_cfg");')
+                        refresh_header_badges()
+                        render_molecule_banner()
+                        if state["tab"] == "trxn" and callable(tab_refreshers.get("trxn")):
+                            tab_refreshers["trxn"]()
+                        ui.notify("ChemBase déconnecté.", type="info")
+                        open_chembase_modal()
+
+                    _btn("Connecter", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=save_cb_cfg)
+                    if cur_key:
+                        _btn("Déconnecter", classes="glass-btn glass-btn-danger", style="height:40px;", on_click=disconnect_cb)
 
                 with ui.element("div").style("display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-bottom:10px;"):
                     in_cb_q = ui.input(placeholder="Filtrer votre catalogue ChemBase par nom ou CAS...").props("outlined dense clearable")
@@ -703,7 +683,7 @@ def index_page(smiles: str = "", cas: str = ""):
                     cb_list_slot.clear()
                     if not u_val or not k_val:
                         with cb_list_slot:
-                            safe_html('<p class="muted-text">Renseignez l\'URL de votre ChemBase et votre clé <code>X-API-Key</code> (visible dans ChemBase ➔ Administration ➔ Sauvegarde, Sync &amp; API) pour parcourir votre catalogue.</p>')
+                            safe_html('<p class="muted-text">Renseignez l\'adresse de votre espace ChemBase et votre clé d\'accès pour parcourir votre catalogue.</p>')
                         return
                     with cb_list_slot:
                         safe_html('<p class="muted-small">Interrogation de ChemBase en cours...</p>')
@@ -717,7 +697,7 @@ def index_page(smiles: str = "", cas: str = ""):
                             safe_html('<p class="muted-text">Aucune fiche trouvée dans ChemBase pour ce filtre.</p>')
                             return
                         for it in items[:40]:
-                            prod_n = clean_val(it.get("produit"))
+                            prod_n = clean_val(it.get("produit") or it.get("nom") or "Sans nom")
                             cas_n = clean_val(it.get("cas"))
                             rx_n = clean_val(it.get("reaction_1"))
 
@@ -750,7 +730,7 @@ def index_page(smiles: str = "", cas: str = ""):
             """
             <footer class="app-footer">
               <span>CHEMSTUDIO v2.0 · RDKIT + DESSINATEUR 2D LIQUID GLASS</span>
-              <span>CONNECTÉ À CHEMBASE v2.0 VIA API REST SÉCURISÉE</span>
+              <span>SUITE COMPUTATIONNELLE · COMPATIBLE CHEMBASE</span>
             </footer>
             """
         )
@@ -760,6 +740,35 @@ def index_page(smiles: str = "", cas: str = ""):
     ui.timer(0.08, lambda: ui.run_javascript("window.cbMovePill(true);"), once=True)
 
     async def boot_resolve():
+        try:
+            saved_theme = await ui.run_javascript('localStorage.getItem("cs_theme")', timeout=2.0)
+            if saved_theme in ("dark", "light"):
+                want_dark = saved_theme == "dark"
+                if want_dark != state["dark"]:
+                    state["dark"] = want_dark
+                    dark.value = want_dark
+                    ui.run_javascript(f'window.cbApplyTheme("{saved_theme}");')
+                    ref = tab_refreshers.get(state["tab"])
+                    if callable(ref):
+                        ref()
+        except Exception:
+            pass
+
+        try:
+            saved_cb_raw = await ui.run_javascript('localStorage.getItem("cs_chembase_cfg")', timeout=2.0)
+            if isinstance(saved_cb_raw, str) and saved_cb_raw:
+                saved_cb = json.loads(saved_cb_raw)
+                if isinstance(saved_cb, dict):
+                    u_s = clean_val(saved_cb.get("url")).rstrip("/")
+                    k_s = clean_val(saved_cb.get("key"))
+                    if u_s and is_safe_public_url(u_s):
+                        state["chembase_url"] = u_s
+                        state["chembase_api_key"] = k_s
+                        _wake_chembase_async(u_s)
+                        refresh_header_badges()
+        except Exception:
+            pass
+
         if clean_val(cas) and not clean_val(smiles):
             found = await run.io_bound(resolve_query_to_smiles, clean_val(cas))
             if found:

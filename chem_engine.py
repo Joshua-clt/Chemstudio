@@ -1,7 +1,7 @@
 from collections import Counter
 from functools import lru_cache
 from itertools import permutations
-import html
+import ipaddress
 import json
 import os
 import re
@@ -50,7 +50,7 @@ def extract_single_smiles(raw_smiles: str) -> str:
 
 def parse_smiles(smiles: str):
     s = clean_val(smiles)
-    if not s:
+    if not s or len(s) > 1500:
         return None
     try:
         return Chem.MolFromSmiles(s)
@@ -58,12 +58,45 @@ def parse_smiles(smiles: str):
         return None
 
 
+def is_mol_too_large(mol, max_heavy_atoms: int = 120) -> bool:
+    return mol is None or int(mol.GetNumHeavyAtoms()) > int(max_heavy_atoms)
+
+
+def is_safe_public_url(url: str) -> bool:
+    raw = clean_val(url)
+    if not raw:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower().strip()
+    if not host:
+        return False
+    if os.environ.get("RENDER") is None and host in ("localhost", "127.0.0.1") and parsed.scheme in ("http", "https"):
+        return True
+    if parsed.scheme != "https":
+        return False
+    if host in ("localhost", "0.0.0.0") or host.endswith((".local", ".internal", ".localhost")):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+    except ValueError:
+        pass
+    return True
+
+
 # ==================================================================
 # 1. CLIENT API CHEMBASE v2.0 (X-API-Key & PRÉ-REMPLISSAGE)
 # ==================================================================
 def get_chembase_config(override_url: str = "", override_key: str = "") -> tuple[str, str]:
     url = clean_val(override_url or os.environ.get("CHEMBASE_URL", "")).rstrip("/")
-    key = clean_val(override_key or os.environ.get("CHEMBASE_API_KEY", ""))
+    if url and not is_safe_public_url(url):
+        url = ""
+    env_key = "" if os.environ.get("RENDER") is not None else os.environ.get("CHEMBASE_API_KEY", "")
+    key = clean_val(override_key or env_key)
     return url, key
 
 
@@ -123,8 +156,14 @@ def build_chembase_send_url(cas: str, name: str, smiles: str, override_url: str 
 # ==================================================================
 # 2. FONCTIONS RÉSEAU PUBCHEM (CAS, IUPAC, SGH, MARKUSH)
 # ==================================================================
-@lru_cache(maxsize=256)
+_IDENT_CACHE: dict[str, dict[str, Any]] = {}
+_RESOLVE_CACHE: dict[str, str] = {}
+
+
 def get_chemical_identifiers(smiles: str) -> dict[str, Any]:
+    key = clean_val(smiles)
+    if key in _IDENT_CACHE:
+        return dict(_IDENT_CACHE[key])
     res: dict[str, Any] = {
         "iupac": "Non répertorié",
         "cas": "Non trouvé",
@@ -132,7 +171,7 @@ def get_chemical_identifiers(smiles: str) -> dict[str, Any]:
         "cid": None,
     }
     try:
-        mol = parse_smiles(smiles)
+        mol = parse_smiles(key)
         if not mol:
             return res
         inchikey = Chem.MolToInchiKey(mol)
@@ -154,16 +193,20 @@ def get_chemical_identifiers(smiles: str) -> dict[str, Any]:
                     if cas_pattern.match(str(syn)):
                         res["cas"] = str(syn)
                         break
+            if len(_IDENT_CACHE) >= 256:
+                _IDENT_CACHE.pop(next(iter(_IDENT_CACHE)))
+            _IDENT_CACHE[key] = dict(res)
     except Exception:
         pass
     return res
 
 
-@lru_cache(maxsize=256)
 def resolve_query_to_smiles(query: str) -> str | None:
     q = clean_val(query)
     if not q:
         return None
+    if q in _RESOLVE_CACHE:
+        return _RESOLVE_CACHE[q]
     mol_t = parse_smiles(q)
     if mol_t:
         return Chem.MolToSmiles(mol_t, canonical=True)
@@ -172,7 +215,12 @@ def resolve_query_to_smiles(query: str) -> str | None:
         r = requests.get(url, timeout=5)
         if r.status_code == 200:
             props = r.json()["PropertyTable"]["Properties"][0]
-            return props.get("CanonicalSMILES") or props.get("ConnectivitySMILES")
+            found = props.get("CanonicalSMILES") or props.get("ConnectivitySMILES")
+            if found:
+                if len(_RESOLVE_CACHE) >= 256:
+                    _RESOLVE_CACHE.pop(next(iter(_RESOLVE_CACHE)))
+                _RESOLVE_CACHE[q] = str(found)
+                return str(found)
     except Exception:
         return None
     return None
@@ -237,7 +285,7 @@ def search_pubchem_markush_analogues(smiles: str, mode: str = "similarity", thre
 # 3. MOTEUR QUANTIQUE (HÜCKEL ÉTENDU : HOMO, LUMO, FUKUI, DIPÔLE)
 # ==================================================================
 def compute_quantum_orbitals(mol) -> dict[str, Any] | None:
-    if mol is None:
+    if is_mol_too_large(mol, 100):
         return None
     h_params = {"C": 0.0, "N": 0.8, "O": 1.5, "S": 0.6, "F": 2.2, "Cl": 1.4, "Br": 1.2, "I": 1.0, "B": -0.8, "P": 0.4}
     k_params = {
@@ -336,7 +384,7 @@ def compute_dipole_moment_3d(mol_3d) -> float:
 # ==================================================================
 def generate_3d_mol(smiles: str, force_field: str = "MMFF94", seed: int = 42):
     mol = parse_smiles(smiles)
-    if not mol:
+    if is_mol_too_large(mol, 120):
         return None
     mol_3d = Chem.AddHs(mol)
     params = AllChem.ETKDGv3()
@@ -529,72 +577,6 @@ viewer.zoomTo();
 viewer.render();
 </script></body></html>"""
 
-
-def build_jsme_editor_html(initial_smiles: str = "", dark_mode: bool = True) -> str:
-    bar_bg = "#0b1416" if dark_mode else "#f1f5f9"
-    bar_txt = "#e6edf3" if dark_mode else "#0f172a"
-    bar_border = "rgba(148,163,184,0.28)" if dark_mode else "rgba(15,23,42,0.14)"
-    return f"""<!DOCTYPE html>
-<html lang="fr"><head><meta charset="utf-8"/>
-<script src="https://jsme-editor.github.io/dist/jsme/jsme.nocache.js"></script>
-<style>
-  html, body {{
-    margin: 0; padding: 0; width: 100%; height: 100%;
-    overflow: hidden; display: flex; flex-direction: column;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #ffffff;
-  }}
-  #jsme_container {{ flex: 1; width: 100%; min-height: 0; }}
-  .jsme-bar {{
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    padding: 8px 12px; background: {bar_bg}; color: {bar_txt};
-    border-top: 1px solid {bar_border}; font-size: 12px;
-  }}
-  .smi-preview {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    opacity: 0.85; flex: 1;
-  }}
-  .apply-btn {{
-    padding: 7px 14px; border-radius: 9px; border: 1px solid rgba(16,185,129,0.65);
-    background: linear-gradient(135deg, #10b981, #0284c7); color: #ffffff;
-    font-weight: 700; font-size: 12px; cursor: pointer; white-space: nowrap;
-  }}
-  .apply-btn:hover {{ filter: brightness(1.08); }}
-</style>
-</head><body>
-  <div id="jsme_container"></div>
-  <div class="jsme-bar">
-    <span id="smi-preview" class="smi-preview">{html.escape(initial_smiles)}</span>
-    <button class="apply-btn" onclick="applyToStudio()">Appliquer au Studio ➔</button>
-  </div>
-<script>
-  let jsmeApplet = null;
-  const initSmi = {json.dumps(initial_smiles)};
-
-  function jsmeOnLoad() {{
-    jsmeApplet = new JSApplet.JSME("jsme_container", "100%", "100%", {{
-      options: "newlook,star,hydrogens,query"
-    }});
-    if (initSmi) {{
-      try {{ jsmeApplet.readGenericMolecularInput(initSmi); }} catch (e) {{}}
-    }}
-    jsmeApplet.setCallBack("AfterStructureModified", function() {{
-      const s = jsmeApplet.smiles() || "";
-      document.getElementById("smi-preview").textContent = s || "(vide)";
-    }});
-  }}
-
-  function applyToStudio() {{
-    if (!jsmeApplet) return;
-    const smi = (jsmeApplet.smiles() || "").trim();
-    if (!smi) return;
-    window.parent.postMessage({{ type: "jsme_smiles", smiles: smi }}, "*");
-  }}
-</script>
-</body></html>"""
-
-
 # ==================================================================
 # 5. PROPRIÉTÉS CHEMPROP, RENDUS 2D SVG & FRAGMENTATION
 # ==================================================================
@@ -709,6 +691,8 @@ def render_reaction_svg(rxn_smiles: str, width: int = 680, height: int = 210) ->
 
 def enumerate_tautomers_svgs(mol, max_count: int = 6) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
+    if is_mol_too_large(mol, 80):
+        return out
     try:
         enumerator = rdMolStandardize.TautomerEnumerator()
         enumerator.SetMaxTautomers(int(max_count))
@@ -1155,6 +1139,8 @@ def calc_isotopic_spectrum(mol) -> tuple[list[dict[str, Any]], list[dict[str, An
         {"ion": "[M + NH₄]⁺", "mz": round(exact_m + 18.03382, 5)},
         {"ion": "[M - H]⁻", "mz": round(exact_m - 1.00728, 5)},
     ]
+    if is_mol_too_large(mol, 120):
+        return adducts, []
 
     iso_table = {
         "H": [(1.007825, 0.999885), (2.014102, 0.000115)],

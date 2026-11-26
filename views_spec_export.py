@@ -3,7 +3,7 @@ from typing import Any
 
 from nicegui import run, ui
 from rdkit import Chem
-from rdkit.Chem import Descriptors
+from rdkit.Chem import Descriptors, rdDepictor
 
 from chem_engine import (
     build_lorentzian_points,
@@ -124,7 +124,10 @@ def build_spec_and_export_views(state: dict[str, Any]):
                                 '<div class="section-kicker">DISTRIBUTION ISOTOPIQUE SIMULÉE</div>'
                                 '<h2>Massif Isotopique (M, M+1, M+2...)</h2>'
                             )
-                            ui.echart({
+                            if not iso_rows:
+                                safe_html('<p class="muted-text">Massif isotopique désactivé pour les structures de plus de 120 atomes lourds (les adduits exacts à gauche restent disponibles).</p>')
+                            else:
+                             ui.echart({
                                 "backgroundColor": "transparent",
                                 "tooltip": {
                                     "trigger": "axis",
@@ -546,9 +549,12 @@ def build_spec_and_export_views(state: dict[str, Any]):
         pub_cfg: dict[str, Any] = {
             "style": PUB_STYLES[0],
             "indices": False,
+            "ghs_gen": 0,
         }
 
         def refresh_tab():
+            pub_cfg["ghs_gen"] = int(pub_cfg.get("ghs_gen", 0)) + 1
+            cur_gen = pub_cfg["ghs_gen"]
             root.clear()
             single_smi = extract_single_smiles(clean_val(state.get("current_smiles")))
             mol_main = parse_smiles(single_smi)
@@ -574,8 +580,12 @@ def build_spec_and_export_views(state: dict[str, Any]):
                             cid = ident.get("cid") if isinstance(ident, dict) else None
                             if not cid:
                                 fresh_id = await run.io_bound(get_chemical_identifiers, single_smi)
+                                if pub_cfg["ghs_gen"] != cur_gen:
+                                    return
                                 cid = fresh_id.get("cid")
                             pictos, hazards = await run.io_bound(get_ghs_safety, cid)
+                            if pub_cfg["ghs_gen"] != cur_gen:
+                                return
                             ghs_slot.clear()
                             with ghs_slot:
                                 if not pictos and not hazards:
@@ -626,7 +636,9 @@ def build_spec_and_export_views(state: dict[str, Any]):
                             ui.download(svg_pub.encode("utf-8"), "ChemStudio_publication.svg")
 
                         def dl_mol(_e=None):
-                            mol_2d = Chem.MolToMolBlock(mol_main)
+                            m2d = Chem.Mol(mol_main)
+                            rdDepictor.Compute2DCoords(m2d)
+                            mol_2d = Chem.MolToMolBlock(m2d)
                             ui.download(mol_2d.encode("utf-8"), "ChemStudio_structure_2d.mol")
 
                         def dl_sdf(_e=None):
