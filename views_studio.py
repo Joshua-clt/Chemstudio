@@ -1,4 +1,5 @@
 import html
+import inspect
 import json
 from typing import Any
 import urllib.parse
@@ -17,13 +18,14 @@ from chem_engine import (
     extract_single_smiles,
     fetch_chembase_catalog,
     generate_3d_mol,
-    get_bond_length_3d,
+    get_adjustable_bonds_3d,
     get_chembase_config,
     get_chemical_identifiers,
     overlay_molecules_3d,
     parse_smiles,
     predict_reaction_candidates,
     render_2d_svg,
+    render_annotated_reaction_svg,
     render_reaction_svg,
     resolve_query_to_smiles,
     run_retrosynthesis_engine,
@@ -142,8 +144,11 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
             "show_h": True,
             "charges": False,
             "spin": False,
-            "bond_ai": 0,
-            "bond_aj": 1,
+            "settings_open": False,
+            "last_smi": "",
+            "bond_key": "",
+            "bond_ai": -1,
+            "bond_aj": -1,
             "bond_dist": 0.0,
             "quantum_surface": "HOMO",
             "overlay_target": "",
@@ -288,71 +293,112 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                     safe_html('<p class="muted-text">Structure chimique invalide. Dessinez ou chargez une molécule valide.</p>')
                     return
 
+                # Réinitialise l'ajustement de liaison dès que la molécule change
+                if single_smi != view_cfg["last_smi"]:
+                    view_cfg["last_smi"] = single_smi
+                    view_cfg["bond_key"] = ""
+                    view_cfg["bond_ai"] = -1
+                    view_cfg["bond_aj"] = -1
+                    view_cfg["bond_dist"] = 0.0
+
                 # --- SOUS-MODE 1 : MODÈLE 3D STANDARD ---
                 if view_cfg["mode_3d"] == "standard":
-                    mol_3d = generate_3d_mol(single_smi, force_field=str(view_cfg["ff"]), seed=int(view_cfg["seed"]))
-                    n_at = mol_3d.GetNumAtoms() if mol_3d else 2
-                    ai_clamped = min(max(0, int(view_cfg["bond_ai"])), max(0, n_at - 1))
-                    aj_clamped = min(max(0, int(view_cfg["bond_aj"])), max(0, n_at - 1))
-                    if aj_clamped == ai_clamped and n_at > 1:
-                        aj_clamped = 1 if ai_clamped == 0 else 0
-                    cur_len = get_bond_length_3d(mol_3d, ai_clamped, aj_clamped) if mol_3d else 1.5
+                    def _on_settings_toggle(e):
+                        is_open = bool(e.value)
+                        if is_open != view_cfg["settings_open"]:
+                            view_cfg["settings_open"] = is_open
+                            refresh_tab()
 
-                    with ui.expansion("Réglages 3D, Conformères & Distances interatomiques", value=False).style("width:100%;margin-bottom:10px;"):
-                        with ui.element("div").style("display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;"):
-                            sel_st = ui.select(["Ball & Stick", "Stick", "Spacefill"], value=view_cfg["style"], label="Style").props("outlined dense")
-                            sel_ff = ui.select(["MMFF94", "UFF"], value=view_cfg["ff"], label="Champ de force").props("outlined dense")
-                            in_seed = ui.number(label="Conformère #", value=int(view_cfg["seed"]), min=1, max=100, step=1).props("outlined dense")
+                    with ui.expansion(
+                        "Réglages 3D, Conformères & Longueurs de liaisons",
+                        value=bool(view_cfg["settings_open"]),
+                        on_value_change=_on_settings_toggle,
+                    ).style("width:100%;margin-bottom:10px;"):
+                        if view_cfg["settings_open"]:
+                            with ui.element("div").style("display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;"):
+                                sel_st = ui.select(["Ball & Stick", "Stick", "Spacefill"], value=view_cfg["style"], label="Style").props("outlined dense")
+                                sel_ff = ui.select(["MMFF94", "UFF"], value=view_cfg["ff"], label="Champ de force").props("outlined dense")
+                                in_seed = ui.number(label="Conformère #", value=int(view_cfg["seed"]), min=1, max=100, step=1).props("outlined dense")
 
-                        with ui.element("div").style("display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;"):
-                            chk_h = ui.checkbox("Hydrogènes", value=bool(view_cfg["show_h"]))
-                            chk_q = ui.checkbox("Charges Gasteiger (δ+/δ-)", value=bool(view_cfg["charges"]))
-                            chk_spin = ui.checkbox("Rotation continue", value=bool(view_cfg["spin"]))
+                            with ui.element("div").style("display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;"):
+                                chk_h = ui.checkbox("Hydrogènes", value=bool(view_cfg["show_h"]))
+                                chk_q = ui.checkbox("Charges partielles Gasteiger (δ+/δ-)", value=bool(view_cfg["charges"]))
+                                chk_spin = ui.checkbox("Rotation continue", value=bool(view_cfg["spin"]))
 
-                        safe_html(f'<div class="muted-small" style="margin-bottom:6px;">Modifier une distance 3D (distance actuelle A{ai_clamped}–A{aj_clamped} : <strong>{cur_len:.2f} Å</strong>)</div>')
-                        with ui.element("div").style("display:grid;grid-template-columns:1fr 1fr 1.3fr auto;gap:8px;align-items:center;"):
-                            in_ai = ui.number(label="Atome A", value=ai_clamped, min=0, max=max(0, n_at - 1), step=1).props("outlined dense")
-                            in_aj = ui.number(label="Atome B", value=aj_clamped, min=0, max=max(0, n_at - 1), step=1).props("outlined dense")
-                            in_d = ui.number(
-                                label="Distance (Å)",
-                                value=float(view_cfg["bond_dist"]) if float(view_cfg["bond_dist"]) > 0 else cur_len,
-                                min=0.8,
-                                max=4.0,
-                                step=0.05,
-                                format="%.2f",
-                            ).props("outlined dense")
-
-                            def apply_3d_settings(_e=None):
-                                view_cfg.update(
-                                    style=str(sel_st.value or "Ball & Stick"),
-                                    ff=str(sel_ff.value or "MMFF94"),
-                                    seed=int(in_seed.value or 42),
-                                    show_h=bool(chk_h.value),
-                                    charges=bool(chk_q.value),
-                                    spin=bool(chk_spin.value),
-                                    bond_ai=int(in_ai.value or 0),
-                                    bond_aj=int(in_aj.value or 1),
-                                    bond_dist=float(in_d.value or 0.0),
+                            for ctrl in (sel_st, sel_ff, in_seed, chk_h, chk_q, chk_spin):
+                                ctrl.on_value_change(
+                                    lambda _e: (
+                                        view_cfg.update(
+                                            style=str(sel_st.value or "Ball & Stick"),
+                                            ff=str(sel_ff.value or "MMFF94"),
+                                            seed=int(in_seed.value or 42),
+                                            show_h=bool(chk_h.value),
+                                            charges=bool(chk_q.value),
+                                            spin=bool(chk_spin.value),
+                                            bond_dist=0.0,
+                                        ),
+                                        refresh_tab(),
+                                    )
                                 )
-                                refresh_tab()
 
-                            _btn("Appliquer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=apply_3d_settings)
-
-                        for ctrl in (sel_st, sel_ff, in_seed, chk_h, chk_q, chk_spin):
-                            ctrl.on_value_change(
-                                lambda _e: (
-                                    view_cfg.update(
-                                        style=str(sel_st.value or "Ball & Stick"),
-                                        ff=str(sel_ff.value or "MMFF94"),
-                                        seed=int(in_seed.value or 42),
-                                        show_h=bool(chk_h.value),
-                                        charges=bool(chk_q.value),
-                                        spin=bool(chk_spin.value),
-                                        bond_dist=0.0,
-                                    ),
-                                    refresh_tab(),
+                            # Chargement rapide des liaisons modifiables (depuis le cache 3D)
+                            mol_3d = generate_3d_mol(single_smi, force_field=str(view_cfg["ff"]), seed=int(view_cfg["seed"]))
+                            adj_bonds = get_adjustable_bonds_3d(mol_3d) if mol_3d else []
+                            if adj_bonds:
+                                bond_opts = {b["key"]: b["label"] for b in adj_bonds}
+                                bond_map = {b["key"]: b for b in adj_bonds}
+                                cur_bk = str(view_cfg["bond_key"])
+                                if cur_bk not in bond_map:
+                                    cur_bk = adj_bonds[0]["key"]
+                                    view_cfg["bond_key"] = cur_bk
+                                cur_b = bond_map[cur_bk]
+                                cur_d_val = (
+                                    float(view_cfg["bond_dist"])
+                                    if (float(view_cfg["bond_dist"]) > 0 and view_cfg["bond_ai"] == cur_b["ai"] and view_cfg["bond_aj"] == cur_b["aj"])
+                                    else float(cur_b["length"])
                                 )
-                            )
+
+                                safe_html('<div class="muted-small" style="margin-bottom:6px;">Ajuster une longueur de liaison (1 Å = 0,1 nm) :</div>')
+                                with ui.element("div").style("display:grid;grid-template-columns:1.6fr 1fr auto auto;gap:8px;align-items:center;"):
+                                    sel_bond = ui.select(bond_opts, value=cur_bk, label="Liaison acyclique").props("outlined dense")
+                                    in_d = ui.number(
+                                        label="Longueur (Å)",
+                                        value=cur_d_val,
+                                        min=0.8,
+                                        max=4.0,
+                                        step=0.05,
+                                        format="%.2f",
+                                    ).props("outlined dense")
+
+                                    def _on_bond_pick(e):
+                                        bk = str(e.value or "")
+                                        if bk in bond_map:
+                                            view_cfg["bond_key"] = bk
+                                            view_cfg["bond_dist"] = 0.0
+                                            refresh_tab()
+
+                                    def _apply_bond_len(_e=None):
+                                        bk = str(sel_bond.value or "")
+                                        if bk not in bond_map:
+                                            return
+                                        b_sel = bond_map[bk]
+                                        view_cfg.update(
+                                            bond_key=bk,
+                                            bond_ai=int(b_sel["ai"]),
+                                            bond_aj=int(b_sel["aj"]),
+                                            bond_dist=float(in_d.value or b_sel["length"]),
+                                        )
+                                        refresh_tab()
+
+                                    def _reset_bond_len(_e=None):
+                                        view_cfg.update(bond_ai=-1, bond_aj=-1, bond_dist=0.0)
+                                        refresh_tab()
+
+                                    sel_bond.on_value_change(_on_bond_pick)
+                                    _btn("Appliquer", classes="glass-btn glass-btn-accent", style="height:40px;", on_click=_apply_bond_len)
+                                    _btn("Réinitialiser", style="height:40px;", on_click=_reset_bond_len)
+                            else:
+                                safe_html('<div class="muted-small">Toutes les liaisons entre atomes lourds sont dans un cycle (longueurs verrouillées).</div>')
 
                     q_params = urllib.parse.urlencode({
                         "smiles": single_smi,
@@ -369,6 +415,16 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                     })
                     safe_html(f'<iframe class="viewer-3d-frame" src="/api/studio/3d/standard?{q_params}" title="Modèle 3D"></iframe>')
 
+                    if view_cfg["charges"]:
+                        safe_html(
+                            '<div class="muted-small" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;">'
+                            '<span><strong>Charges partielles :</strong></span>'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#3278fa;margin-right:4px;"></span>Bleu : zone pauvre en électrons (δ⁺)</span>'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#cbd5e1;margin-right:4px;"></span>Blanc : neutre</span>'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#f53c3c;margin-right:4px;"></span>Rouge : zone riche en électrons (δ⁻)</span>'
+                            '</div>'
+                        )
+
                 # --- SOUS-MODE 2 : CHIMIE QUANTIQUE (HOMO / LUMO / ESP) ---
                 elif view_cfg["mode_3d"] == "quantum":
                     q_res = compute_quantum_orbitals(mol_main)
@@ -376,7 +432,7 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                     dip_d = compute_dipole_moment_3d(mol_3d_q) if mol_3d_q else 0.0
 
                     if not q_res or not mol_3d_q:
-                        safe_html('<p class="muted-text">Calcul quantique indisponible pour cette structure.</p>')
+                        safe_html('<p class="muted-text">Calcul quantique indisponible (ou molécule supérieure à 100 atomes lourds).</p>')
                         return
 
                     safe_html(
@@ -414,7 +470,32 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                         "mode": str(view_cfg["quantum_surface"]),
                         "dark": d_flag,
                     })
-                    safe_html(f'<iframe class="viewer-3d-frame" style="height:385px;" src="/api/studio/3d/quantum?{q_params}" title="Orbitale 3D"></iframe>')
+                    safe_html(f'<iframe class="viewer-3d-frame" style="height:375px;" src="/api/studio/3d/quantum?{q_params}" title="Orbitale 3D"></iframe>')
+
+                    surf_now = str(view_cfg["quantum_surface"])
+                    if surf_now == "HOMO":
+                        safe_html(
+                            '<div class="muted-small" style="margin-top:8px;">'
+                            '<strong>HOMO :</strong> zones où la molécule donne le plus facilement des électrons (sites nucléophiles). '
+                            'Les lobes bleu et rouge indiquent les deux phases opposées de l\'orbitale.'
+                            '</div>'
+                        )
+                    elif surf_now == "LUMO":
+                        safe_html(
+                            '<div class="muted-small" style="margin-top:8px;">'
+                            '<strong>LUMO :</strong> zones où la molécule accepte le plus facilement des électrons (sites électrophiles). '
+                            'Les lobes bleu et rouge indiquent les deux phases opposées de l\'orbitale.'
+                            '</div>'
+                        )
+                    else:
+                        safe_html(
+                            '<div class="muted-small" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;">'
+                            '<span><strong>Surface ESP :</strong></span>'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#3278fa;margin-right:4px;"></span>Bleu : zone δ⁺ (électrophile)</span>'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#cbd5e1;margin-right:4px;"></span>Blanc : neutre</span>'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#f53c3c;margin-right:4px;"></span>Rouge : zone δ⁻ (nucléophile)</span>'
+                            '</div>'
+                        )
 
                 # --- SOUS-MODE 3 : SUPERPOSITION 3D (MCS / RMSD) ---
                 else:
@@ -457,12 +538,19 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                             f"""
                             <div class="kpi-grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px;">
                               <div class="kpi-card"><div class="kpi-label">Squelette commun (MCS)</div><div class="kpi-value" style="font-size:1.05rem;color:var(--accent);">{mcs_atoms} atomes</div></div>
-                              <div class="kpi-card"><div class="kpi-label">Écart RMSD 3D (Vert vs Cyan)</div><div class="kpi-value" style="font-size:1.05rem;color:var(--cyan);">{rmsd_txt}</div></div>
+                              <div class="kpi-card"><div class="kpi-label">Écart géométrique 3D (RMSD)</div><div class="kpi-value" style="font-size:1.05rem;color:var(--cyan);">{rmsd_txt}</div></div>
                             </div>
                             """
                         )
                         q_params = urllib.parse.urlencode({"s1": single_smi, "s2": target_s2, "dark": d_flag})
-                        safe_html(f'<iframe class="viewer-3d-frame" style="height:385px;" src="/api/studio/3d/overlay?{q_params}" title="Superposition 3D"></iframe>')
+                        safe_html(f'<iframe class="viewer-3d-frame" style="height:375px;" src="/api/studio/3d/overlay?{q_params}" title="Superposition 3D"></iframe>')
+                        safe_html(
+                            '<div class="muted-small" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:8px;">'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e;margin-right:4px;"></span>Vert : molécule active</span>'
+                            '<span><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#38bdf8;margin-right:4px;"></span>Cyan : molécule comparée</span>'
+                            '<span>Plus le RMSD est proche de 0 Å, plus les deux géométries 3D se superposent.</span>'
+                            '</div>'
+                        )
                     else:
                         safe_html('<p class="muted-text">Impossible de générer la superposition 3D pour ces deux structures.</p>')
 
@@ -509,6 +597,114 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
         catalog_dialog = ui.dialog().props('transition-show="fade" transition-hide="fade"')
         with catalog_dialog:
             catalog_dialog_body = ui.element("div").classes("cb-modal-card").style("max-width:740px;width:95vw;")
+        # Modale 3 : Rechargement d'une expérience sauvegardée (.json)
+        load_exp_dialog = ui.dialog().props('transition-show="fade" transition-hide="fade"')
+        with load_exp_dialog:
+            load_exp_body = ui.element("div").classes("cb-modal-card").style("max-width:520px;width:94vw;")
+
+        def open_load_exp_modal():
+            load_exp_body.clear()
+            with load_exp_body:
+                with ui.element("div").classes("modal-head"):
+                    with ui.element("div"):
+                        safe_html('<div class="section-kicker">CAHIER DE LABORATOIRE</div>')
+                        safe_html('<h2 style="margin:4px 0 0 0;font-size:1.18rem;">Charger une expérience (.json)</h2>')
+                    _btn("Fermer ✕", on_click=lambda _e: load_exp_dialog.close())
+
+                safe_html(
+                    '<p class="muted-small" style="margin:0 0 12px 0;">'
+                    'Importez un fichier <code>.json</code> exporté depuis ChemStudio pour restaurer '
+                    'les réactifs, produits, conditions et réglages de stœchiométrie.'
+                    '</p>'
+                )
+
+                async def _on_exp_upload(e):
+                    try:
+                        file_obj = getattr(e, "file", None)
+                        content_obj = getattr(e, "content", None)
+                        if file_obj is not None:
+                            raw_data = file_obj.read()
+                            if inspect.isawaitable(raw_data):
+                                raw_data = await raw_data
+                        elif content_obj is not None:
+                            raw_data = content_obj.read()
+                        else:
+                            ui.notify("Impossible de lire le fichier sélectionné.", type="negative")
+                            return
+                        if isinstance(raw_data, str):
+                            data = json.loads(raw_data)
+                        else:
+                            data = json.loads(raw_data.decode("utf-8"))
+                    except Exception:
+                        ui.notify("Fichier JSON invalide ou corrompu.", type="negative")
+                        return
+
+                    if not isinstance(data, dict):
+                        ui.notify("Format d'expérience non reconnu.", type="negative")
+                        return
+
+                    raw_r_val = data.get("reactants")
+                    raw_r: list[Any] = raw_r_val if isinstance(raw_r_val, list) else []
+                    raw_p_val = data.get("products")
+                    raw_p: list[Any] = raw_p_val if isinstance(raw_p_val, list) else []
+                    r_valid = [Chem.MolToSmiles(m, canonical=True) for s in raw_r[:12] if (m := parse_smiles(str(s))) is not None]
+                    p_valid = [Chem.MolToSmiles(m, canonical=True) for s in raw_p[:12] if (m := parse_smiles(str(s))) is not None]
+
+                    if not r_valid and not p_valid:
+                        ui.notify("Aucune structure chimique valide trouvée dans ce fichier.", type="warning")
+                        return
+
+                    state["rxn_reactants"] = r_valid
+                    state["rxn_products"] = p_valid
+                    state["rxn_edit_target"] = None
+
+                    raw_c_val = data.get("conditions")
+                    raw_c: dict[str, Any] = raw_c_val if isinstance(raw_c_val, dict) else {}
+                    state["rxn_conditions"] = {
+                        "solvent": clean_val(raw_c.get("solvent"))[:120],
+                        "temp": clean_val(raw_c.get("temp"))[:60],
+                        "duration": clean_val(raw_c.get("duration"))[:60],
+                    }
+
+                    raw_st_val = data.get("stoich")
+                    st_in: dict[str, Any] = raw_st_val if isinstance(raw_st_val, dict) else {}
+                    lim_i = int(st_in.get("limiting_idx") or 0)
+                    rxn_cfg["limiting_idx"] = lim_i if (0 <= lim_i < len(r_valid)) else 0
+                    rxn_cfg["start_qty"] = max(0.001, float(st_in.get("start_qty") or 500.0))
+                    u_st = str(st_in.get("start_unit") or "mg")
+                    rxn_cfg["start_unit"] = u_st if u_st in ("mg", "g", "mmol", "mL") else "mg"
+                    rxn_cfg["exp_qty"] = max(0.0, float(st_in.get("exp_qty") or 0.0))
+                    u_ex = str(st_in.get("exp_unit") or "mg")
+                    rxn_cfg["exp_unit"] = u_ex if u_ex in ("mg", "g") else "mg"
+
+                    loaded_rp = st_in.get("row_params")
+                    if isinstance(loaded_rp, dict):
+                        clean_rp: dict[str, Any] = {}
+                        for rk, rv in list(loaded_rp.items())[:30]:
+                            if isinstance(rv, dict):
+                                qm = str(rv.get("qual_mode") or "%")
+                                clean_rp[str(rk)] = {
+                                    "eq": max(0.01, float(rv.get("eq") or 1.0)),
+                                    "dens": max(0.05, float(rv.get("dens") or 1.0)),
+                                    "qual_mode": qm if qm in ("%", "M") else "%",
+                                    "qual_val": max(0.01, float(rv.get("qual_val") or 100.0)),
+                                }
+                        rxn_cfg["row_params"] = clean_rp
+
+                    _sync_rxn_smiles(state)
+                    on_basket_change()
+                    load_exp_dialog.close()
+                    ui.notify("Expérience chargée avec succès.", type="positive")
+                    refresh_tab()
+
+                ui.upload(
+                    label="Sélectionner un fichier .json",
+                    auto_upload=True,
+                    max_file_size=500_000,
+                    on_upload=_on_exp_upload,
+                ).props('accept=".json" flat bordered').style("width:100%;")
+
+            load_exp_dialog.open()
 
         def _apply_predicted_product(prod_smi: str, rxn_name: str):
             cur_p = list(state.get("rxn_products", []))
@@ -1084,22 +1280,86 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                                 '<div><div class="section-kicker">CONSTRUCTEUR RÉACTIONNEL VISUEL</div>'
                                 '<h2 style="margin:2px 0 0 0;font-size:1.15rem;">Schéma &amp; Conditions de Réaction</h2></div>'
                             )
-                            if r_list or p_list:
-                                def _clear_all(_e=None):
-                                    state["rxn_reactants"] = []
-                                    state["rxn_products"] = []
-                                    state["rxn_edit_target"] = None
-                                    rxn_cfg["limiting_idx"] = 0
-                                    _sync_rxn_smiles(state)
-                                    on_basket_change()
-                                    refresh_tab()
+                            with ui.element("div").style("display:flex;align-items:center;gap:6px;flex-wrap:wrap;"):
+                                def _build_rxn_export_svg() -> str:
+                                    return render_annotated_reaction_svg(
+                                        r_list,
+                                        p_list,
+                                        solvent=str(conds.get("solvent", "")),
+                                        temp=str(conds.get("temp", "")),
+                                        duration=str(conds.get("duration", "")),
+                                        style_name="RSC Standard (Couleurs sobres)",
+                                        transparent=True,
+                                    )
 
-                                _btn(
-                                    "Vider",
-                                    classes="glass-btn glass-btn-danger",
-                                    style="padding:5px 11px;font-size:0.76rem;",
-                                    on_click=_clear_all,
-                                )
+                                def _copy_rxn_png():
+                                    svg_out = _build_rxn_export_svg()
+                                    if not svg_out:
+                                        ui.notify("Ajoutez au moins une molécule à la réaction.", type="warning")
+                                        return
+                                    ui.run_javascript(f"window.csCopySvgAsPng({json.dumps(svg_out)});")
+
+                                def _dl_rxn_svg():
+                                    svg_out = _build_rxn_export_svg()
+                                    if not svg_out:
+                                        ui.notify("Ajoutez au moins une molécule à la réaction.", type="warning")
+                                        return
+                                    ui.download(svg_out.encode("utf-8"), "ChemStudio_reaction.svg")
+
+                                def _save_exp_json():
+                                    payload = {
+                                        "app": "ChemStudio",
+                                        "version": 1,
+                                        "reactants": r_list,
+                                        "products": p_list,
+                                        "conditions": {
+                                            "solvent": clean_val(conds.get("solvent")),
+                                            "temp": clean_val(conds.get("temp")),
+                                            "duration": clean_val(conds.get("duration")),
+                                        },
+                                        "stoich": {
+                                            "limiting_idx": int(rxn_cfg["limiting_idx"]),
+                                            "start_qty": float(rxn_cfg["start_qty"]),
+                                            "start_unit": str(rxn_cfg["start_unit"]),
+                                            "exp_qty": float(rxn_cfg["exp_qty"]),
+                                            "exp_unit": str(rxn_cfg["exp_unit"]),
+                                            "row_params": dict(rxn_cfg["row_params"]),
+                                        },
+                                    }
+                                    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+                                    ui.download(raw, "ChemStudio_experience.json")
+                                    ui.notify("Expérience enregistrée (.json).", type="positive")
+
+                                if r_list or p_list:
+                                    exp_sch_btn = _btn("Exporter schéma ▾", style="padding:5px 11px;font-size:0.76rem;")
+                                    with exp_sch_btn:
+                                        with ui.menu():
+                                            ui.menu_item("Copier image transparente (PNG)", on_click=_copy_rxn_png)
+                                            ui.menu_item("Télécharger vectoriel (.svg)", on_click=_dl_rxn_svg)
+
+                                exp_file_btn = _btn("Expérience ▾", style="padding:5px 11px;font-size:0.76rem;")
+                                with exp_file_btn:
+                                    with ui.menu():
+                                        if r_list or p_list:
+                                            ui.menu_item("Enregistrer (.json)", on_click=_save_exp_json)
+                                        ui.menu_item("Charger (.json)", on_click=open_load_exp_modal)
+
+                                if r_list or p_list:
+                                    def _clear_all(_e=None):
+                                        state["rxn_reactants"] = []
+                                        state["rxn_products"] = []
+                                        state["rxn_edit_target"] = None
+                                        rxn_cfg["limiting_idx"] = 0
+                                        _sync_rxn_smiles(state)
+                                        on_basket_change()
+                                        refresh_tab()
+
+                                    _btn(
+                                        "Vider",
+                                        classes="glass-btn glass-btn-danger",
+                                        style="padding:5px 11px;font-size:0.76rem;",
+                                        on_click=_clear_all,
+                                    )
 
                         # Flux : [ Cartes Réactifs + Ajouter ] -> [ Flèche / Prédire / Conditions ] -> [ Cartes Produits + Ajouter ]
                         with ui.element("div").style(

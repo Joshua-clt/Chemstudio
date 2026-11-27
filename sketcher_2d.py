@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 from rdkit import Chem
-from rdkit.Chem import rdDepictor
+from chem_engine import compute_clean_2d_coords
 from rdkit.Geometry import Point3D
 
 
@@ -16,12 +16,12 @@ def mol_to_graph(smiles: str) -> dict[str, Any]:
         return {"atoms": [], "bonds": []}
 
     mol_copy = Chem.Mol(mol)
+    compute_clean_2d_coords(mol_copy)
     try:
         Chem.Kekulize(mol_copy, clearAromaticFlags=True)
     except Exception:
         pass
 
-    rdDepictor.Compute2DCoords(mol_copy)
     conf = mol_copy.GetConformer()
     try:
         Chem.WedgeMolBonds(mol_copy, conf)
