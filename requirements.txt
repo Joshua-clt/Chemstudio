@@ -1,4 +1,4 @@
-nicegui
-rdkit
-numpy
-requests
+nicegui==4.1.0
+rdkit==2026.9.2
+numpy==2.4.6
+requests==2.34.2
