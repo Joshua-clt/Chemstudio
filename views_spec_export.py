@@ -661,7 +661,6 @@ def build_spec_and_export_views(state: dict[str, Any]):
                             else:
                                 safe_html('<p class="muted-text">Aucune corrélation HSQC / HMBC détectée.</p>')
 
-        refresh_tab()
         return refresh_tab
 
     # ==================================================================
@@ -831,7 +830,6 @@ def build_spec_and_export_views(state: dict[str, Any]):
                                     _btn("Copier image (PNG)", classes="glass-btn glass-btn-accent", on_click=copy_rxn_pub_png)
                                     _btn("Vectoriel (.svg)", on_click=dl_rxn_pub_svg)
 
-        refresh_tab()
         return refresh_tab
 
     return render_tab_spec, render_tab_export

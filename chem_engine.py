@@ -532,6 +532,22 @@ def _charge_to_hex(q: float) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+_THREED_THEME_SYNC_JS = """
+const _apply3dBg = (isDark) => {
+  const nb = isDark ? "#0b1416" : "#f8fafc";
+  document.documentElement.style.background = nb;
+  document.body.style.background = nb;
+  const el = document.getElementById("v3d");
+  if (el) el.style.background = nb;
+  viewer.setBackgroundColor(nb);
+  viewer.render();
+};
+window.addEventListener("message", (ev) => {
+  if (ev.data && ev.data.type === "cs_set_theme") _apply3dBg(!!ev.data.dark);
+});
+"""
+
+
 def build_3dmol_standard_html(
     mol_3d,
     style: str = "Ball & Stick",
@@ -550,13 +566,21 @@ def build_3dmol_standard_html(
 <style>html,body,#v3d{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:{bg};}}</style>
 </head><body><div id="v3d"></div>
 <script>
+let initBg = {json.dumps(bg)};
+try {{
+  const pt = window.parent && window.parent.document.documentElement.getAttribute("data-theme");
+  if (pt === "light") initBg = "#f8fafc";
+  else if (pt === "dark") initBg = "#0b1416";
+}} catch (_e) {{}}
+document.documentElement.style.background = initBg;
+document.body.style.background = initBg;
 const molBlock = {json.dumps(mol_block)};
 const hexMap = {json.dumps(hex_map)};
 const styleName = {json.dumps(style)};
 const showH = {json.dumps(bool(show_h))};
 const colorCharges = {json.dumps(bool(color_charges))};
 const doSpin = {json.dumps(bool(spin))};
-const viewer = $3Dmol.createViewer("v3d", {{backgroundColor: {json.dumps(bg)}}});
+const viewer = $3Dmol.createViewer("v3d", {{backgroundColor: initBg}});
 viewer.addModel(molBlock, "mol");
 if (colorCharges && hexMap.length > 0) {{
   const cFunc = (atom) => hexMap[atom.serial - 1] || "#94a3b8";
@@ -578,6 +602,7 @@ if (!showH) viewer.setStyle({{elem: "H"}}, {{}});
 viewer.zoomTo();
 if (doSpin) viewer.spin("y", 0.7);
 viewer.render();
+{_THREED_THEME_SYNC_JS}
 </script></body></html>"""
 
 
@@ -613,11 +638,19 @@ def build_3dmol_quantum_html(
 <style>html,body,#v3d{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:{bg};}}</style>
 </head><body><div id="v3d"></div>
 <script>
+let initBg = {json.dumps(bg)};
+try {{
+  const pt = window.parent && window.parent.document.documentElement.getAttribute("data-theme");
+  if (pt === "light") initBg = "#f8fafc";
+  else if (pt === "dark") initBg = "#0b1416";
+}} catch (_e) {{}}
+document.documentElement.style.background = initBg;
+document.body.style.background = initBg;
 const molBlock = {json.dumps(mol_block)};
 const spheres = {json.dumps(spheres)};
 const hexMap = {json.dumps(hex_map)};
 const mode = {json.dumps(mode)};
-const viewer = $3Dmol.createViewer("v3d", {{backgroundColor: {json.dumps(bg)}}});
+const viewer = $3Dmol.createViewer("v3d", {{backgroundColor: initBg}});
 viewer.addModel(molBlock, "mol");
 viewer.setStyle({{}}, {{stick: {{radius: 0.14}}, sphere: {{scale: 0.22}}}});
 if (mode === "HOMO" || mode === "LUMO") {{
@@ -632,6 +665,7 @@ if (mode === "HOMO" || mode === "LUMO") {{
 }}
 viewer.zoomTo();
 viewer.render();
+{_THREED_THEME_SYNC_JS}
 </script></body></html>"""
 
 
@@ -645,13 +679,22 @@ def build_3dmol_overlay_html(mol_1, mol_2, dark_mode: bool = True) -> str:
 <style>html,body,#v3d{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:{bg};}}</style>
 </head><body><div id="v3d"></div>
 <script>
-const viewer = $3Dmol.createViewer("v3d", {{backgroundColor: {json.dumps(bg)}}});
+let initBg = {json.dumps(bg)};
+try {{
+  const pt = window.parent && window.parent.document.documentElement.getAttribute("data-theme");
+  if (pt === "light") initBg = "#f8fafc";
+  else if (pt === "dark") initBg = "#0b1416";
+}} catch (_e) {{}}
+document.documentElement.style.background = initBg;
+document.body.style.background = initBg;
+const viewer = $3Dmol.createViewer("v3d", {{backgroundColor: initBg}});
 viewer.addModel({json.dumps(b1)}, "mol");
 viewer.setStyle({{model: 0}}, {{stick: {{colorscheme: "greenCarbon", radius: 0.18}}}});
 viewer.addModel({json.dumps(b2)}, "mol");
 viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: "cyanCarbon", radius: 0.18}}}});
 viewer.zoomTo();
 viewer.render();
+{_THREED_THEME_SYNC_JS}
 </script></body></html>"""
 
 # ==================================================================

@@ -235,6 +235,7 @@ def index_page(smiles: str = "", cas: str = ""):
     tab_buttons: dict[str, Any] = {}
     tab_panels: dict[str, Any] = {}
     tab_refreshers: dict[str, Any] = {}
+    dirty_tabs: set[str] = {"trxn", "tstruct", "tspec", "texport"}
 
     # Modales globales
     examples_dialog = ui.dialog().props('transition-show="fade" transition-hide="fade"')
@@ -286,16 +287,20 @@ def index_page(smiles: str = "", cas: str = ""):
                 def toggle_theme(_e=None):
                     state["dark"] = not state["dark"]
                     mode = "dark" if state["dark"] else "light"
-                    ui.run_javascript(f'localStorage.setItem("cs_theme", "{mode}");')
-                    ui.run_javascript(f'window.cbToggleThemeWave("{mode}");')
+                    ui.run_javascript(f'localStorage.setItem("cs_theme", "{mode}"); window.cbToggleThemeWave("{mode}");')
 
                     def after_wave():
                         dark.value = state["dark"]
-                        ref = tab_refreshers.get(state["tab"])
-                        if callable(ref):
-                            ref()
+                        # Seul l'onglet 4 (ECharts) nécessite une mise à jour de ses axes après l'onde
+                        if state["tab"] == "tspec":
+                            ref = tab_refreshers.get("tspec")
+                            if callable(ref):
+                                ref()
+                            dirty_tabs.discard("tspec")
+                        else:
+                            dirty_tabs.add("tspec")
 
-                    ui.timer(0.1, after_wave, once=True)
+                    ui.timer(0.34, after_wave, once=True)
 
                 with (
                     ui.element("button")
@@ -327,6 +332,9 @@ def index_page(smiles: str = "", cas: str = ""):
         banner_slot = ui.element("div")
 
         def refresh_header_badges():
+            dirty_tabs.add("texport")
+            if state["tab"] != "trxn":
+                dirty_tabs.add("trxn")
             basket_btn_slot.clear()
             with basket_btn_slot:
                 r_n = len(state["rxn_reactants"])
@@ -466,12 +474,15 @@ def index_page(smiles: str = "", cas: str = ""):
             state["chembase_match"] = None
 
             render_molecule_banner()
+            dirty_tabs.update(("t2d3d", "trxn", "tstruct", "tspec", "texport"))
             if switch_to_2d and state["tab"] != "t2d3d":
                 switch_tab("t2d3d")
             else:
-                ref = tab_refreshers.get(state["tab"])
+                cur_t = state["tab"]
+                ref = tab_refreshers.get(cur_t)
                 if callable(ref):
                     ref()
+                dirty_tabs.discard(cur_t)
 
             # Double cadence : différé (0.85 s) lors du dessin en direct, quasi-immédiat sinon
             prev_timer = state.get("pubchem_timer")
@@ -548,9 +559,11 @@ def index_page(smiles: str = "", cas: str = ""):
                 b.classes(add="active") if k == tab_key else b.classes(remove="active")
             for k, p in tab_panels.items():
                 p.classes(add="active") if k == tab_key else p.classes(remove="active")
-            ref = tab_refreshers.get(tab_key)
-            if callable(ref):
-                ref()
+            if tab_key in dirty_tabs:
+                dirty_tabs.discard(tab_key)
+                ref = tab_refreshers.get(tab_key)
+                if callable(ref):
+                    ref()
             ui.run_javascript("window.cbMovePill(false);")
 
         # --- MODALES ---
@@ -748,9 +761,7 @@ def index_page(smiles: str = "", cas: str = ""):
                     state["dark"] = want_dark
                     dark.value = want_dark
                     ui.run_javascript(f'window.cbApplyTheme("{saved_theme}");')
-                    ref = tab_refreshers.get(state["tab"])
-                    if callable(ref):
-                        ref()
+                    
         except Exception:
             pass
 

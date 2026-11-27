@@ -2080,7 +2080,6 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                                         )
 
         rxn_refresh_ref["fn"] = refresh_tab
-        refresh_tab()
         return refresh_tab
 
     # ==================================================================
@@ -2123,20 +2122,36 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                             '<div class="muted-small" style="margin-bottom:12px;">Noir : indices d\'atomes · Bleu : indices de liaisons (utiles pour la fragmentation MS et les distances 3D).</div>'
                         )
 
-                        with ui.expansion("Explorer les formes tautomères (jusqu'à 6 formes)", value=False).style("width:100%;"):
+                        taut_loaded = {"done": False}
+                        taut_slot_ref: dict[str, Any] = {"el": None}
+
+                        def _on_taut_toggle(e):
+                            slot = taut_slot_ref["el"]
+                            if not bool(e.value) or taut_loaded["done"] or slot is None:
+                                return
+                            taut_loaded["done"] = True
+                            slot.clear()
                             tauts = enumerate_tautomers_svgs(mol_main, max_count=6)
-                            if not tauts:
-                                safe_html('<span class="muted-small">Aucun autre tautomère énuméré.</span>')
-                            else:
-                                with ui.element("div").style("display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px;padding-top:8px;"):
-                                    for idx, t in enumerate(tauts):
-                                        with ui.element("div").classes("kv-item").style("text-align:center;"):
-                                            safe_html(f'<div class="svg-box-adaptive" style="padding:4px;margin-bottom:6px;">{t["svg"]}</div>')
-                                            _btn(
-                                                f"Charger #{idx + 1}",
-                                                style="width:100%;padding:4px 8px;font-size:0.73rem;",
-                                                on_click=lambda _e, s=t["smiles"]: on_molecule_change(s),
-                                            )
+                            with slot:
+                                if not tauts:
+                                    safe_html('<span class="muted-small">Aucun autre tautomère énuméré.</span>')
+                                else:
+                                    with ui.element("div").style("display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px;padding-top:8px;"):
+                                        for idx, t in enumerate(tauts):
+                                            with ui.element("div").classes("kv-item").style("text-align:center;"):
+                                                safe_html(f'<div class="svg-box-adaptive" style="padding:4px;margin-bottom:6px;">{t["svg"]}</div>')
+                                                _btn(
+                                                    f"Charger #{idx + 1}",
+                                                    style="width:100%;padding:4px 8px;font-size:0.73rem;",
+                                                    on_click=lambda _e, s=t["smiles"]: on_molecule_change(s),
+                                                )
+
+                        with ui.expansion(
+                            "Explorer les formes tautomères (jusqu'à 6 formes)",
+                            value=False,
+                            on_value_change=_on_taut_toggle,
+                        ).style("width:100%;"):
+                            taut_slot_ref["el"] = ui.element("div")
 
                     with ui.element("div").classes("hud-card"):
                         safe_html(
@@ -2164,7 +2179,6 @@ def build_studio_views(state: dict[str, Any], on_molecule_change, on_basket_chan
                             """
                         )
 
-        refresh_tab()
         return refresh_tab
 
     return render_tab_2d3d, render_tab_rxn, render_tab_struct

@@ -108,11 +108,17 @@ html, body {
   background-color: var(--bg) !important;
   color: var(--txt) !important;
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
   background-image:
     radial-gradient(circle at 12% 10%, var(--bg-grad-1), transparent 36%),
     radial-gradient(circle at 86% 14%, var(--bg-grad-2), transparent 34%),
     radial-gradient(circle at 52% 92%, var(--bg-grad-3), transparent 40%);
-  background-attachment: fixed;
 }
 
 .nicegui-content {
@@ -209,15 +215,15 @@ html, body {
   padding: 8px 13px;
   border-radius: 11px;
   background: var(--card-glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--border);
   color: var(--txt);
   font-family: 'Plus Jakarta Sans', sans-serif;
   font-size: 0.81rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
   text-decoration: none;
 }
 .glass-btn:hover {
@@ -262,7 +268,7 @@ html[data-theme="light"] .icon-moon { display: block; }
   padding: 5px;
   border-radius: 15px;
   background: var(--card-glass);
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(10px);
   border: 1px solid var(--border);
   max-width: 100%;
   overflow-x: auto;
@@ -311,8 +317,8 @@ html[data-theme="light"] .icon-moon { display: block; }
 
 .hud-card {
   background: var(--card-glass);
-  backdrop-filter: blur(18px) saturate(160%);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  backdrop-filter: blur(10px);
+-webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--border);
   border-radius: 16px;
   padding: 18px 20px;
@@ -326,7 +332,7 @@ html[data-theme="light"] .icon-moon { display: block; }
 
 .mol-banner {
   background: var(--card-glass);
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(10px);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   border-radius: 14px;
@@ -608,12 +614,18 @@ html[data-theme="dark"] .svg-box-adaptive svg {
 </style>
 
 <script>
-window.csPushThemeToSketcher = function(isDark) {
+window.csPushThemeToViewers = function(isDark) {
   const f = document.getElementById("cs-sketcher-iframe");
   if (f && f.contentWindow) {
     f.contentWindow.postMessage({ type: "cs_set_theme", dark: !!isDark }, "*");
   }
+  document.querySelectorAll("iframe.viewer-3d-frame").forEach((fr) => {
+    if (fr && fr.contentWindow) {
+      fr.contentWindow.postMessage({ type: "cs_set_theme", dark: !!isDark }, "*");
+    }
+  });
 };
+window.csPushThemeToSketcher = window.csPushThemeToViewers;
 
 window.csPushGraphToSketcher = function(graphObj) {
   const f = document.getElementById("cs-sketcher-iframe");
@@ -635,13 +647,15 @@ window.csPushSketcherStatus = function(ok, text, invalidIds, smiles) {
 window.cbApplyTheme = function(mode) {
   const isLight = mode === "light";
   document.documentElement.setAttribute("data-theme", isLight ? "light" : "dark");
-  window.csPushThemeToSketcher(!isLight);
+  if (window.Quasar && window.Quasar.Dark) {
+    window.Quasar.Dark.set(!isLight);
+  }
+  window.csPushThemeToViewers(!isLight);
 };
 
 window.cbToggleThemeWave = function(mode) {
   const target = mode === "light" ? "light" : "dark";
   const btn = document.getElementById("theme-toggle");
-  window.csPushThemeToSketcher(target !== "light");
   if (!document.startViewTransition || !btn) {
     window.cbApplyTheme(target);
     return;
@@ -659,7 +673,7 @@ window.cbToggleThemeWave = function(mode) {
   transition.ready.then(() => {
     document.documentElement.animate(
       { clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${endRadius}px at ${x}px ${y}px)`] },
-      { duration: 480, easing: "cubic-bezier(0.22, 1, 0.36, 1)", pseudoElement: "::view-transition-new(root)" }
+      { duration: 300, easing: "cubic-bezier(0.22, 1, 0.36, 1)", pseudoElement: "::view-transition-new(root)" }
     );
   });
 };
